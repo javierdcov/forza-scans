@@ -21,7 +21,7 @@ const db     = getFirestore(fbApp);
 
 // Register service worker
 if ('serviceWorker' in navigator)
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
 
 // ── State ─────────────────────────────────────────────────────
 let state = {
@@ -365,6 +365,13 @@ ${noShows.length > 0 ? `<div class="sec">No se presentaron — cuentan para el g
 let scanCooldown = false;
 
 function rerender() {
+  // Ensure activeRoomId is valid once rooms load
+  if (state.rooms.length > 0 && !state.rooms.find(r => r.id === state.activeRoomId)) {
+    const assigned = state.profile?.assignedRoom;
+    state.activeRoomId = assigned && state.rooms.find(r => r.id === assigned) ? assigned : state.rooms[0].id;
+    startListeners(state.activeRoomId);
+  }
+
   const root = document.getElementById('root');
   if (!root) return;
 
@@ -1413,15 +1420,4 @@ function startApp() {
   state.appMode = isAdmin ? 'admin' : 'operator';
 
   rerender();
-}
-
-// ── Once rooms load, ensure activeRoomId is valid ─────────────
-const _origRerender = rerender;
-function rerender() {
-  if (state.rooms.length > 0 && !state.rooms.find(r => r.id === state.activeRoomId)) {
-    const assigned = state.profile?.assignedRoom;
-    state.activeRoomId = assigned && state.rooms.find(r => r.id === assigned) ? assigned : state.rooms[0].id;
-    startListeners(state.activeRoomId);
-  }
-  _origRerender();
 }
