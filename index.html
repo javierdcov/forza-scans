@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
-<meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
 <meta name="apple-mobile-web-app-title" content="Forza Scans"/>
 <meta name="theme-color" content="#1B1EA8"/>
@@ -350,8 +350,8 @@ function geo() {
 const eventDocRef   = () => doc(db, DB_ROOT, 'current_event');
 const roomsColRef   = () => collection(db, DB_ROOT, 'current_event', 'rooms');
 const roomDocRef    = id => doc(db, DB_ROOT, 'current_event', 'rooms', id);
-const usersColRef   = () => collection(db, DB_ROOT, 'users');
-const userDocRef    = uid => doc(db, DB_ROOT, 'users', uid);
+const usersColRef   = () => collection(db, 'forza_users');
+const userDocRef    = uid => doc(db, 'forza_users', uid);
 const scansColRef   = roomId => collection(db, DB_ROOT, 'current_event', 'rooms', roomId, 'scans');
 const shiftsColRef  = roomId => collection(db, DB_ROOT, 'current_event', 'rooms', roomId, 'shifts');
 const shiftDocRef   = (roomId, shiftId) => doc(db, DB_ROOT, 'current_event', 'rooms', roomId, 'shifts', shiftId);
