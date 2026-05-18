@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+<meta name="apple-mobile-web-app-title" content="Forza Scans"/>
+<meta name="theme-color" content="#1B1EA8"/>
+<link rel="manifest" href="/manifest.json"/>
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png"/>
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png"/>
+<title>Forza Scans</title>
+<link rel="stylesheet" href="/css/app.css"/>
+</head>
+<body>
+<div id="root">
+  <div class="splash">
+    <img src="/icons/icon-192.png" style="width:80px;height:80px;border-radius:18px;box-shadow:0 4px 16px rgba(0,0,0,0.15)" alt="Forza"/>
+    <div class="splash-name">Forza Scans</div>
+    <div class="splash-loading">Cargando…</div>
+  </div>
+</div>
+<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<!-- Firebase SDKs -->
+<script type="module" src="/src/app.js"></script>
+</body>
+</html>
