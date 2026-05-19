@@ -1311,16 +1311,16 @@ function buildRoomAdmin(room) {
   // Wire shift time save buttons
   setTimeout(() => {
     SHIFT_DEFS_LOCAL.forEach(def => {
-      const saveBtn = document.getElementById(\`shift-save-\${def.id}\`);
+      const saveBtn = document.getElementById(`shift-save-${def.id}`);
       if (saveBtn) saveBtn.onclick = async () => {
-        const start = document.getElementById(\`shift-start-\${def.id}\`)?.value;
-        const end   = document.getElementById(\`shift-end-\${def.id}\`)?.value;
+        const start = document.getElementById(`shift-start-${def.id}`)?.value;
+        const end   = document.getElementById(`shift-end-${def.id}`)?.value;
         const newCfg = JSON.parse(JSON.stringify(room.shiftConfig || {}));
         if (!newCfg[def.id]) newCfg[def.id] = { enabled: true };
         newCfg[def.id].start = start;
         newCfg[def.id].end   = end;
         await updateDoc(roomDocRef(room.id), { shiftConfig: newCfg });
-        const btn = document.getElementById(\`shift-save-\${def.id}\`);
+        const btn = document.getElementById(`shift-save-${def.id}`);
         if (btn) { btn.textContent = '✓'; setTimeout(() => { btn.textContent = 'Guardar'; }, 1500); }
       };
     });
