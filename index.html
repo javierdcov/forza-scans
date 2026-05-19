@@ -443,8 +443,16 @@ function startListeners(roomId) {
   // Rooms collection
   const u2 = base.collection('rooms').onSnapshot(snap => {
     state.rooms = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    if (!state.activeRoomId && state.rooms.length > 0)
-      state.activeRoomId = state.profile?.assignedRoom || state.rooms[0].id;
+    // If we don't have a valid room yet, pick one and restart listeners with real ID
+    if (!state.activeRoomId || state.activeRoomId === '_placeholder') {
+      const assigned = state.profile?.assignedRoom;
+      state.activeRoomId = (assigned && state.rooms.find(r => r.id === assigned))
+        ? assigned : (state.rooms[0]?.id || null);
+      if (state.activeRoomId) {
+        startListeners(state.activeRoomId); // restart with real room ID
+        return;
+      }
+    }
     rerender();
   });
 
