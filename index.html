@@ -290,11 +290,9 @@ input:checked + .swss::before { transform:translateX(12px) }
     <div class="splash-loading">Cargando…</div>
   </div>
 </div>
-<!-- QR Libraries -->
 <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js"></script>
+<script src="https://unpkg.com/@zxing/browser@0.1.4/umd/index.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<!-- Firebase compat SDK -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
@@ -1211,8 +1209,8 @@ function buildScanner(room, isAdmin) {
             toggle.textContent = 'Detener escáner';
             toggle.className = 'btn btn-ghost';
 
-            // Initialize ZXing then start scanning loop
-            initZXing().then(() => tickScan(vid, persistCanvas));
+            // Start scanning loop
+            tickScan(vid, persistCanvas);
           }
         } catch(err) {
           console.error('Camera error:', err);
