@@ -848,9 +848,13 @@ function openShiftModal(def, existing, room) {
 }
 
 window.confirmOpenShift = async (defId, name, emoji) => {
+  console.log('[SHIFT] confirmOpenShift called:', defId, name, emoji);
   const room = state.rooms.find(r => r.id === state.activeRoomId);
-  if (!room) return;
+  console.log('[SHIFT] room:', room?.id, room?.name);
+  console.log('[SHIFT] sh-start value:', $('sh-start')?.value);
+  if (!room) { console.error('[SHIFT] No room found!'); return; }
   const shiftRef = doc(shiftsColRef(state.activeRoomId));
+  console.log('[SHIFT] writing to Firestore...');
   await setDoc(shiftRef, {
     shiftKey:      defId,
     name, emoji,
@@ -864,6 +868,7 @@ window.confirmOpenShift = async (defId, name, emoji) => {
     day:           today(),
     location:      state.geo || null,
   });
+  console.log('[SHIFT] Firestore write complete, closing modal');
   closeModal();
 };
 
@@ -985,10 +990,16 @@ function showModal(html, room) {
   m.innerHTML = `<div class="modal-box">${html}</div>`;
   m.style.display = 'flex';
   // Re-expose globals after innerHTML update so inline onclick works in module context
-  m.querySelectorAll('button[onclick]').forEach(btn => {
+  const btns = m.querySelectorAll('button[onclick]');
+  console.log('[MODAL] Rewiring', btns.length, 'buttons');
+  btns.forEach(btn => {
     const fn = btn.getAttribute('onclick');
+    console.log('[MODAL] Wiring button:', fn);
     btn.removeAttribute('onclick');
-    btn.addEventListener('click', () => { try { eval(fn); } catch(e) { console.error(e); } });
+    btn.addEventListener('click', () => { 
+      console.log('[MODAL] Button clicked, executing:', fn);
+      try { eval(fn); } catch(e) { console.error('[MODAL] eval error:', e); } 
+    });
   });
 }
 
@@ -1173,6 +1184,7 @@ function tickScan(video, canvas) {
   
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   
+  console.log('[QR] Starting scan interval, video state:', video?.readyState, 'dimensions:', video?.videoWidth, 'x', video?.videoHeight);
   rafId = setInterval(() => {
     if (!video || video.readyState < 2 || video.videoWidth === 0 || video.paused) return;
     try {
@@ -1185,6 +1197,7 @@ function tickScan(video, canvas) {
       const imageData = ctx.getImageData(0, 0, w, h);
       const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
       if (code && code.data && code.data.trim()) {
+        console.log('[QR] Code detected:', code.data.trim().substring(0, 50));
         handleScan(code.data.trim());
       }
     } catch(e) { /* ignore frame errors */ }
