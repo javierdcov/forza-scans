@@ -842,35 +842,34 @@ function openShiftModal(def, existing, room) {
     <label class="form-label">Cantidad garantizada de comensales</label>
     <input class="minput" id="sh-expected" type="number" min="0" value="${existing?.expectedCount || 0}" style="width:100%;margin-bottom:18px"/>
     <div style="display:flex;gap:8px">
-      <button class="btn-sm btn-sm-ghost" onclick="closeModal()">Cancelar</button>
-      <button class="btn-sm btn-sm-green" onclick="confirmOpenShift('${def.id}','${def.name}','${def.emoji}')">Abrir turno</button>
-    </div>`, room);
+      <button class="btn-sm btn-sm-ghost" data-action="cancel">Cancelar</button>
+      <button class="btn-sm btn-sm-green" data-action="open-shift">Abrir turno</button>
+    </div>`,
+    {
+      'cancel': () => closeModal(),
+      'open-shift': async () => {
+        const room2 = state.rooms.find(r => r.id === state.activeRoomId);
+        if (!room2) return;
+        const shiftRef = doc(shiftsColRef(state.activeRoomId));
+        await setDoc(shiftRef, {
+          shiftKey:      def.id,
+          name:          def.name,
+          emoji:         def.emoji,
+          start:         $('sh-start')?.value || def.defaultStart,
+          end:           $('sh-end')?.value || def.defaultEnd,
+          expectedCount: Number($('sh-expected')?.value || 0),
+          status:        'open',
+          openedAt:      timeNow(),
+          closedAt:      null,
+          scanCount:     0,
+          day:           today(),
+          location:      state.geo || null,
+        });
+        closeModal();
+      }
+    }
+  );
 }
-
-window.confirmOpenShift = async (defId, name, emoji) => {
-  console.log('[SHIFT] confirmOpenShift called:', defId, name, emoji);
-  const room = state.rooms.find(r => r.id === state.activeRoomId);
-  console.log('[SHIFT] room:', room?.id, room?.name);
-  console.log('[SHIFT] sh-start value:', $('sh-start')?.value);
-  if (!room) { console.error('[SHIFT] No room found!'); return; }
-  const shiftRef = doc(shiftsColRef(state.activeRoomId));
-  console.log('[SHIFT] writing to Firestore...');
-  await setDoc(shiftRef, {
-    shiftKey:      defId,
-    name, emoji,
-    start:         $('sh-start')?.value || '',
-    end:           $('sh-end')?.value || '',
-    expectedCount: Number($('sh-expected').value),
-    status:        'open',
-    openedAt:      timeNow(),
-    closedAt:      null,
-    scanCount:     0,
-    day:           today(),
-    location:      state.geo || null,
-  });
-  console.log('[SHIFT] Firestore write complete, closing modal');
-  closeModal();
-};
 
 function closeShiftModal(shift, room) {
   // Build suggested no-shows from active access combos
@@ -923,9 +922,14 @@ function closeShiftModal(shift, room) {
       <div id="manual-ns-list"></div>
     </div>
     <div style="display:flex;gap:8px">
-      <button class="btn-sm btn-sm-ghost" onclick="closeModal()">Cancelar</button>
-      <button class="btn-sm btn-sm-red" onclick="confirmCloseShift('${shift.id}')">Cerrar turno</button>
-    </div>`, room);
+      <button class="btn-sm btn-sm-ghost" data-action="cancel">Cancelar</button>
+      <button class="btn-sm btn-sm-red" data-action="close-shift">Cerrar turno</button>
+    </div>`,
+    {
+      'cancel': () => { manualNSEntries = []; closeModal(); },
+      'close-shift': () => confirmCloseShift(shift.id)
+    }
+  );
 }
 
 let manualNSEntries = [];
@@ -980,7 +984,13 @@ window.confirmCloseShift = async (shiftId) => {
 };
 
 // ── Modal system ──────────────────────────────────────────────
-function showModal(html, room) {
+// Action registry for modal buttons — avoids eval() in module context
+const modalActions = {};
+
+function showModal(html, actions = {}) {
+  // Merge actions into registry
+  Object.assign(modalActions, actions);
+  
   let m = $('app-modal');
   if (!m) {
     m = el('div', 'modal-overlay', '');
@@ -989,16 +999,13 @@ function showModal(html, room) {
   }
   m.innerHTML = `<div class="modal-box">${html}</div>`;
   m.style.display = 'flex';
-  // Re-expose globals after innerHTML update so inline onclick works in module context
-  const btns = m.querySelectorAll('button[onclick]');
-  console.log('[MODAL] Rewiring', btns.length, 'buttons');
-  btns.forEach(btn => {
-    const fn = btn.getAttribute('onclick');
-    console.log('[MODAL] Wiring button:', fn);
-    btn.removeAttribute('onclick');
-    btn.addEventListener('click', () => { 
-      console.log('[MODAL] Button clicked, executing:', fn);
-      try { eval(fn); } catch(e) { console.error('[MODAL] eval error:', e); } 
+
+  // Wire data-action buttons
+  m.querySelectorAll('button[data-action]').forEach(btn => {
+    const action = btn.getAttribute('data-action');
+    btn.addEventListener('click', () => {
+      if (modalActions[action]) modalActions[action]();
+      else console.warn('[MODAL] No action registered for:', action);
     });
   });
 }
@@ -1188,20 +1195,36 @@ function tickScan(video, canvas) {
   rafId = setInterval(() => {
     if (!video || video.readyState < 2 || video.videoWidth === 0 || video.paused) return;
     try {
-      const w = video.videoWidth;
-      const h = video.videoHeight;
-      if (w === 0 || h === 0) return;
-      canvas.width  = w;
-      canvas.height = h;
-      ctx.drawImage(video, 0, 0, w, h);
-      const imageData = ctx.getImageData(0, 0, w, h);
-      const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (vw === 0 || vh === 0) return;
+
+      // Scan full frame first
+      canvas.width  = vw;
+      canvas.height = vh;
+      ctx.drawImage(video, 0, 0, vw, vh);
+      let imageData = ctx.getImageData(0, 0, vw, vh);
+      let code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+
+      // If not found, try scanning just the center 60% of the frame (where the scan box is)
+      if (!code) {
+        const cx = Math.floor(vw * 0.2);
+        const cy = Math.floor(vh * 0.2);
+        const cw = Math.floor(vw * 0.6);
+        const ch = Math.floor(vh * 0.6);
+        canvas.width  = cw;
+        canvas.height = ch;
+        ctx.drawImage(video, cx, cy, cw, ch, 0, 0, cw, ch);
+        imageData = ctx.getImageData(0, 0, cw, ch);
+        code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+      }
+
       if (code && code.data && code.data.trim()) {
         console.log('[QR] Code detected:', code.data.trim().substring(0, 50));
         handleScan(code.data.trim());
       }
     } catch(e) { /* ignore frame errors */ }
-  }, 100); // 10 frames per second — fast enough for QR, light on CPU
+  }, 150); // ~7fps — enough for QR scanning
 }
 
 function stopCamera() {
