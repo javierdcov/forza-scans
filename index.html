@@ -1215,6 +1215,15 @@ function buildScanner(room, isAdmin) {
             hint.textContent = 'Apunta al QR del acreditado';
             box.appendChild(hint);
 
+            // Debug bar — shows which engine is active
+            const debugBar = document.createElement('div');
+            debugBar.id = 'qr-debug';
+            debugBar.style.cssText = 'position:absolute;top:8px;left:0;right:0;text-align:center;font-size:11px;color:rgba(255,255,0,0.9);font-weight:bold;z-index:10;padding:2px 8px';
+            const hasNative = typeof BarcodeDetector !== 'undefined';
+            const hasZXing = typeof ZXing !== 'undefined' && ZXing.QRCodeReader;
+            debugBar.textContent = hasNative ? '● Native BarcodeDetector' : hasZXing ? '● ZXing' : '● jsQR only';
+            box.appendChild(debugBar);
+
             await vid.play();
             scanning = true;
             toggle.textContent = 'Detener escáner';
