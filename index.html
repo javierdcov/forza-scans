@@ -290,14 +290,11 @@ input:checked + .swss::before { transform:translateX(12px) }
     <div class="splash-loading">Cargando…</div>
   </div>
 </div>
-<!-- jsQR and XLSX -->
 <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<!-- Firebase compat SDK (global scope — no modules needed) -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
-<!-- App (regular script — full global scope, no module isolation) -->
 <script>
 // ═══════════════════════════════════════════════════════════════
 //  FORZA SCANS — app.js  (Firebase compat SDK, global scope)
@@ -411,7 +408,7 @@ auth.onAuthStateChanged(async user => {
   if (user) {
     state.authUser = user;
     const profileSnap = await getDoc(userDocRef(user.uid));
-    if (profileSnap.exists()) {
+    if (profileSnap.exists) {
       state.profile = profileSnap.data();
       startApp();
     } else {
