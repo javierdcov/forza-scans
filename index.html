@@ -407,9 +407,9 @@ const shiftDocRef   = (roomId, shiftId) => doc(db, DB_ROOT, 'current_event', 'ro
 auth.onAuthStateChanged(async user => {
   if (user) {
     state.authUser = user;
-    const profileSnap = await getDoc(userDocRef(user.uid));
+    const profileSnap = await db.collection('forza_users').doc(user.uid).get();
     if (profileSnap.exists) {
-      state.profile = profileSnap.data();
+      state.profile = profileSnap.data() || null;
       startApp();
     } else {
       // First login — create profile (master admin path)
@@ -432,38 +432,45 @@ function stopListeners() {
 function startListeners(roomId) {
   stopListeners();
 
+  const base = db.collection('forza_eventos').doc('current_event');
+
   // Event doc
-  const u1 = onSnapshot(eventDocRef(), snap => {
+  const u1 = base.onSnapshot(snap => {
     state.event = snap.data() || {};
     rerender();
   });
 
-  // Rooms
-  const u2 = onSnapshot(roomsColRef(), snap => {
+  // Rooms collection
+  const u2 = base.collection('rooms').onSnapshot(snap => {
     state.rooms = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     if (!state.activeRoomId && state.rooms.length > 0)
       state.activeRoomId = state.profile?.assignedRoom || state.rooms[0].id;
     rerender();
   });
 
+  if (!roomId || roomId === '_placeholder') {
+    state.unsubscribers = [u1, u2];
+    return;
+  }
+
+  const roomBase = base.collection('rooms').doc(roomId);
+
   // Scans for active room today
-  const u3 = onSnapshot(
-    query(scansColRef(roomId), where('day', '==', today())),
-    snap => {
+  const u3 = roomBase.collection('scans')
+    .where('day', '==', today())
+    .onSnapshot(snap => {
       state.scans = snap.docs.map(d => ({ id: d.id, ...d.data() }))
         .sort((a, b) => (b.ts?.seconds || 0) - (a.ts?.seconds || 0));
       rerender();
-    }
-  );
+    });
 
   // Shifts for active room today
-  const u4 = onSnapshot(
-    query(shiftsColRef(roomId), where('day', '==', today())),
-    snap => {
+  const u4 = roomBase.collection('shifts')
+    .where('day', '==', today())
+    .onSnapshot(snap => {
       state.shifts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       rerender();
-    }
-  );
+    });
 
   state.unsubscribers = [u1, u2, u3, u4];
 }
@@ -595,7 +602,7 @@ function dlFile(content, filename, type) {
 
 async function exportForzaCSV(roomId) {
   const room  = state.rooms.find(r => r.id === roomId);
-  const snap  = await getDocs(scansColRef(roomId));
+  const snap  = await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(roomId).collection('scans').get();
   const scans = snap.docs.map(d => d.data()).filter(s => s.type === 'scan');
   const rows  = [['Fecha','Turno','Hora','Resultado','Codigo','Nombre','Estado','Deporte','Categorias','Comedor','Lat','Lng']];
   scans.forEach(s => rows.push([
@@ -613,7 +620,7 @@ async function exportGovReport(roomId, shiftId) {
   const room      = state.rooms.find(r => r.id === roomId);
   const shiftSnap = await getDoc(shiftDocRef(roomId, shiftId));
   const shift     = { id: shiftId, ...shiftSnap.data() };
-  const allScans  = (await getDocs(scansColRef(roomId))).docs.map(d => d.data()).filter(s => s.shiftId === shiftId);
+  const allScans  = (await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(roomId).collection('scans').get()).docs.map(d => d.data()).filter(s => s.shiftId === shiftId);
   const present   = allScans.filter(s => s.type === 'scan' && (s.result?.result === 'granted' || s.result?.result === 'auto-added'));
   const noShows   = allScans.filter(s => s.type === 'noshow' || s.type === 'manual-noshow');
   const geo       = shift.location || state.geo;
@@ -1445,7 +1452,7 @@ function buildRoomAdmin(room) {
         if (!newCfg[def.id]) newCfg[def.id] = { enabled: true };
         newCfg[def.id].start = start;
         newCfg[def.id].end   = end;
-        await updateDoc(roomDocRef(room.id), { shiftConfig: newCfg });
+        await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ shiftConfig: newCfg });
         const btn = document.getElementById(`shift-save-${def.id}`);
         if (btn) { btn.textContent = '✓'; setTimeout(() => { btn.textContent = 'Guardar'; }, 1500); }
       };
@@ -1518,7 +1525,7 @@ function buildRoomAdmin(room) {
             cats.forEach(c => { if (!newAcc[sp].states[st].cats[c]) newAcc[sp].states[st].cats[c] = { enabled: true }; });
           });
         });
-        await updateDoc(roomDocRef(room.id), { access: newAcc });
+        await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
         upMsg.textContent = `✓ "${file.name}" importado y fusionado.`;
         upMsg.className = 'ibar ibar-g';
       } catch { upMsg.textContent = 'Error al procesar el archivo.'; upMsg.className = 'ibar ibar-r'; }
@@ -1526,7 +1533,7 @@ function buildRoomAdmin(room) {
     $('add-sport-btn')?.addEventListener('click', async () => {
       const v = $('new-sport-input')?.value.trim(); if (!v) return;
       const newAcc = { ...(room.access || {}), [v]: { enabled: true, states: {} } };
-      await updateDoc(roomDocRef(room.id), { access: newAcc });
+      await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
     });
   }, 0);
 
@@ -1546,7 +1553,7 @@ function buildSportBlock(room, sport, sObj) {
     const newAcc = JSON.parse(JSON.stringify(room.access));
     newAcc[sport].enabled = val;
     Object.values(newAcc[sport].states).forEach(s => { s.enabled = val; Object.values(s.cats).forEach(c => c.enabled = val); });
-    await updateDoc(roomDocRef(room.id), { access: newAcc });
+    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
   });
   hdr.appendChild(sw);
 
@@ -1556,7 +1563,7 @@ function buildSportBlock(room, sport, sObj) {
     if (!confirm(`¿Eliminar "${sport}"?`)) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     delete newAcc[sport];
-    await updateDoc(roomDocRef(room.id), { access: newAcc });
+    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
   };
   hdr.appendChild(delBtn);
 
@@ -1574,7 +1581,7 @@ function buildSportBlock(room, sport, sObj) {
     const v = addStRow.querySelector('input').value.trim(); if (!v) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     if (!newAcc[sport].states[v]) newAcc[sport].states[v] = { enabled: true, cats: {} };
-    await updateDoc(roomDocRef(room.id), { access: newAcc });
+    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
   };
   body.appendChild(addStRow);
   block.appendChild(hdr); block.appendChild(body);
@@ -1589,7 +1596,7 @@ function buildStateBlock(room, sport, state2, stObj) {
     const newAcc = JSON.parse(JSON.stringify(room.access));
     newAcc[sport].states[state2].enabled = val;
     Object.values(newAcc[sport].states[state2].cats).forEach(c => c.enabled = val);
-    await updateDoc(roomDocRef(room.id), { access: newAcc });
+    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
   }, 'sm');
   hdr.appendChild(sw);
   const delBtn = el('button', 'del-btn', '✕');
@@ -1598,7 +1605,7 @@ function buildStateBlock(room, sport, state2, stObj) {
     if (!confirm(`¿Eliminar "${state2}"?`)) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     delete newAcc[sport].states[state2];
-    await updateDoc(roomDocRef(room.id), { access: newAcc });
+    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
   };
   hdr.appendChild(delBtn);
 
@@ -1611,14 +1618,14 @@ function buildStateBlock(room, sport, state2, stObj) {
     row.appendChild(buildToggle(catObj.enabled, async val => {
       const newAcc = JSON.parse(JSON.stringify(room.access));
       newAcc[sport].states[state2].cats[cat].enabled = val;
-      await updateDoc(roomDocRef(room.id), { access: newAcc });
+      await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
     }, 'sm'));
     const d = el('button', 'del-btn', '✕');
     d.onclick = async () => {
       if (!confirm(`¿Eliminar "${cat}"?`)) return;
       const newAcc = JSON.parse(JSON.stringify(room.access));
       delete newAcc[sport].states[state2].cats[cat];
-      await updateDoc(roomDocRef(room.id), { access: newAcc });
+      await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
     };
     row.appendChild(d);
     body.appendChild(row);
@@ -1630,7 +1637,7 @@ function buildStateBlock(room, sport, state2, stObj) {
     const v = addCatRow.querySelector('input').value.trim(); if (!v) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     newAcc[sport].states[state2].cats[v] = { enabled: true };
-    await updateDoc(roomDocRef(room.id), { access: newAcc });
+    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
   };
   body.appendChild(addCatRow);
   block.appendChild(hdr); block.appendChild(body);
@@ -1888,13 +1895,12 @@ function renderFirstSetup() {
     const name = $('setup-name')?.value.trim();
     if (!name) return;
     try {
-      await setDoc(userDocRef(state.authUser.uid), {
-        email: state.authUser.email, name, role: 'master_admin', createdAt: serverTimestamp(),
+      await db.collection('forza_users').doc(state.authUser.uid).set({
+        email: state.authUser.email, name, role: 'master_admin', createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
       // Create default event + first room
-      await setDoc(eventDocRef(), { name: 'Olimpiada Nacional 2026', createdAt: serverTimestamp() }, { merge: true });
-      const firstRoom = doc(roomsColRef());
-      await setDoc(firstRoom, { name: 'Comedor Principal', access: buildSeedAccess(), pin: '', createdAt: serverTimestamp() });
+      await db.collection('forza_eventos').doc('current_event').set({ name: 'Olimpiada Nacional 2026', createdAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      await db.collection('forza_eventos').doc('current_event').collection('rooms').doc().set({ name: 'Comedor Principal', access: buildSeedAccess(), pin: '', createdAt: firebase.firestore.FieldValue.serverTimestamp() });
       state.profile = { role: 'master_admin', name };
       startApp();
     } catch (e) {
