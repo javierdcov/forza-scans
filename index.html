@@ -1229,8 +1229,8 @@ function buildScanner(room, isAdmin) {
             toggle.textContent = 'Detener escáner';
             toggle.className = 'btn btn-ghost';
 
-            // Start scanning loop
-            tickScan(vid, persistCanvas);
+            // Start scanning loop — pass live video by id lookup
+            tickScan(document.getElementById('qr-video-live'), persistCanvas);
           }
         } catch(err) {
           console.error('Camera error:', err);
@@ -1259,46 +1259,61 @@ function buildScanner(room, isAdmin) {
 }
 
 function tickScan(video, canvas) {
-  // Use setInterval at ~10fps — more reliable than rAF inside module scripts
-  // and gives jsQR enough time per frame on mobile
   if (rafId) clearInterval(rafId);
-  
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  
-  console.log('[QR] Starting scan interval, video state:', video?.readyState, 'dimensions:', video?.videoWidth, 'x', video?.videoHeight);
-  rafId = setInterval(() => {
-    if (!video || video.readyState < 2 || video.videoWidth === 0 || video.paused) return;
-    try {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (vw === 0 || vh === 0) return;
 
-      // Scan full frame first
-      canvas.width  = vw;
-      canvas.height = vh;
-      ctx.drawImage(video, 0, 0, vw, vh);
+  // Prefer Native BarcodeDetector (faster, hardware-accelerated on Android)
+  const useNative = typeof BarcodeDetector !== 'undefined';
+  const detector = useNative ? new BarcodeDetector({ formats: ['qr_code'] }) : null;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  console.log('[QR] Starting scan. Engine:', useNative ? 'BarcodeDetector' : 'jsQR',
+    '| video readyState:', video?.readyState,
+    '| dimensions:', video?.videoWidth, 'x', video?.videoHeight);
+
+  rafId = setInterval(async () => {
+    // Always resolve the LIVE video element by id — handles rebuild case
+    const liveVideo = document.getElementById('qr-video-live') || video;
+    if (!liveVideo || liveVideo.readyState < 2 || liveVideo.videoWidth === 0 || liveVideo.paused) return;
+
+    try {
+      if (useNative) {
+        // BarcodeDetector: no canvas needed, works directly on video element
+        const barcodes = await detector.detect(liveVideo);
+        if (barcodes.length > 0 && barcodes[0].rawValue) {
+          console.log('[QR] BarcodeDetector hit:', barcodes[0].rawValue.substring(0, 50));
+          handleScan(barcodes[0].rawValue.trim());
+        }
+        return;
+      }
+
+      // jsQR fallback
+      const vw = liveVideo.videoWidth;
+      const vh = liveVideo.videoHeight;
+
+      // Full frame
+      canvas.width = vw; canvas.height = vh;
+      ctx.drawImage(liveVideo, 0, 0, vw, vh);
       let imageData = ctx.getImageData(0, 0, vw, vh);
       let code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
 
-      // If not found, try scanning just the center 60% of the frame (where the scan box is)
+      // Center crop fallback (where the scan frame overlay sits)
       if (!code) {
-        const cx = Math.floor(vw * 0.2);
-        const cy = Math.floor(vh * 0.2);
-        const cw = Math.floor(vw * 0.6);
-        const ch = Math.floor(vh * 0.6);
-        canvas.width  = cw;
-        canvas.height = ch;
-        ctx.drawImage(video, cx, cy, cw, ch, 0, 0, cw, ch);
+        const cx = Math.floor(vw * 0.2), cy = Math.floor(vh * 0.2);
+        const cw = Math.floor(vw * 0.6), ch = Math.floor(vh * 0.6);
+        canvas.width = cw; canvas.height = ch;
+        ctx.drawImage(liveVideo, cx, cy, cw, ch, 0, 0, cw, ch);
         imageData = ctx.getImageData(0, 0, cw, ch);
         code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
       }
 
-      if (code && code.data && code.data.trim()) {
-        console.log('[QR] Code detected:', code.data.trim().substring(0, 50));
+      if (code?.data?.trim()) {
+        console.log('[QR] jsQR hit:', code.data.trim().substring(0, 50));
         handleScan(code.data.trim());
       }
-    } catch(e) { /* ignore frame errors */ }
-  }, 150); // ~7fps — enough for QR scanning
+    } catch (e) {
+      console.warn('[QR] Frame error:', e.message);
+    }
+  }, 150);
 }
 
 function stopCamera() {
