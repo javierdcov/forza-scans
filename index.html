@@ -881,24 +881,29 @@ function openShiftModal(def, existing, room) {
     {
       'cancel': () => closeModal(),
       'open-shift': async () => {
-        const room2 = state.rooms.find(r => r.id === state.activeRoomId);
-        if (!room2) return;
-        const shiftRef = doc(shiftsColRef(state.activeRoomId));
-        await setDoc(shiftRef, {
-          shiftKey:      def.id,
-          name:          def.name,
-          emoji:         def.emoji,
-          start:         $('sh-start')?.value || def.defaultStart,
-          end:           $('sh-end')?.value || def.defaultEnd,
-          expectedCount: Number($('sh-expected')?.value || 0),
-          status:        'open',
-          openedAt:      timeNow(),
-          closedAt:      null,
-          scanCount:     0,
-          day:           today(),
-          location:      state.geo || null,
-        });
+        const startVal    = $('sh-start')?.value || def.defaultStart;
+        const endVal      = $('sh-end')?.value || def.defaultEnd;
+        const expectedVal = Number($('sh-expected')?.value || 0);
+        const roomId      = state.activeRoomId;
+        const room2       = state.rooms.find(r => r.id === roomId);
+        if (!room2) { console.error('No room found'); return; }
         closeModal();
+        try {
+          const newShiftRef = db
+            .collection('forza_eventos').doc('current_event')
+            .collection('rooms').doc(roomId)
+            .collection('shifts').doc();
+          await newShiftRef.set({
+            shiftKey: def.id, name: def.name, emoji: def.emoji,
+            start: startVal, end: endVal, expectedCount: expectedVal,
+            status: 'open', openedAt: timeNow(), closedAt: null,
+            scanCount: 0, day: today(), location: state.geo || null,
+          });
+          console.log('[SHIFT] Opened:', def.name);
+        } catch(e) {
+          console.error('[SHIFT] Error:', e.message);
+          alert('Error al abrir turno: ' + e.message);
+        }
       }
     }
   );
