@@ -731,6 +731,9 @@ function rerender() {
   if (!state.authUser) { renderLogin(); return; }
   if (!state.profile)  { return; }
 
+  // Don't rebuild the page while a scan result is on screen
+  if (scanCooldown && state.view === 'scanner') return;
+
   const isAdmin = state.profile.role === 'master_admin' || state.profile.role === 'admin';
   const room    = state.rooms.find(r => r.id === state.activeRoomId);
 
@@ -1325,7 +1328,11 @@ async function handleScan(raw) {
   if (scanCooldown) return;
   scanCooldown = true;
   await processScan(raw);
-  setTimeout(() => { scanCooldown = false; }, 2800);
+  setTimeout(() => {
+    scanCooldown = false;
+    // Trigger a clean rerender now that the result card has been visible
+    rerender();
+  }, 2800);
 }
 
 function showScanResult(parsed, result) {
