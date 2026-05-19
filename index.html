@@ -1084,37 +1084,72 @@ function buildScanner(room, isAdmin) {
     const manIn  = $('man-input');
     let scanning = false;
 
+    // Create a persistent canvas that lives outside the camera box
+    // so it never gets destroyed when we rebuild the box innerHTML
+    const persistCanvas = document.createElement('canvas');
+    persistCanvas.style.display = 'none';
+    document.body.appendChild(persistCanvas);
+
     if (toggle) toggle.onclick = async () => {
       if (!scanning) {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+          const constraints = {
+            video: {
+              facingMode: { ideal: 'environment' },
+              width:  { ideal: 1280 },
+              height: { ideal: 720 }
+            }
+          };
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
           videoStream = stream;
-          const v = $('qr-video');
+
+          // Build camera UI inside the box
           const box = $('cam-box');
-          if (v && box) {
-            v.srcObject = stream; v.style.display = 'block';
-            box.style.height = 'auto'; box.style.display = 'block';
+          if (box) {
+            box.style.cssText = 'background:#111;border-radius:12px;overflow:hidden;position:relative;margin-bottom:10px';
             box.innerHTML = '';
-            box.appendChild(v);
-            const overlay = el('div', 'scan-overlay');
+            const vid = document.createElement('video');
+            vid.id = 'qr-video-live';
+            vid.playsInline = true;
+            vid.muted = true;
+            vid.setAttribute('playsinline', '');
+            vid.setAttribute('webkit-playsinline', '');
+            vid.style.cssText = 'width:100%;display:block';
+            vid.srcObject = stream;
+            box.appendChild(vid);
+            const overlay = document.createElement('div');
+            overlay.className = 'scan-overlay';
             overlay.innerHTML = '<div class="scan-frame"><div class="scan-line"></div></div>';
             box.appendChild(overlay);
-            const hint = el('div', 'scan-hint', 'Apunta al QR del acreditado');
+            const hint = document.createElement('div');
+            hint.className = 'scan-hint';
+            hint.textContent = 'Apunta al QR del acreditado';
             box.appendChild(hint);
-            await v.play();
+
+            await vid.play();
             scanning = true;
             toggle.textContent = 'Detener escáner';
             toggle.className = 'btn btn-ghost';
-            tickScan(v, $('qr-canvas'));
+
+            // Start scanning loop with the persistent canvas
+            tickScan(vid, persistCanvas);
           }
-        } catch { alert('No se pudo acceder a la cámara.'); }
+        } catch(err) {
+          console.error('Camera error:', err);
+          alert('No se pudo acceder a la cámara: ' + err.message);
+        }
       } else {
         stopCamera();
         scanning = false;
         toggle.textContent = 'Iniciar escáner';
         toggle.className = 'btn btn-blue';
+        // Remove the persistent canvas
+        if (persistCanvas.parentNode) persistCanvas.parentNode.removeChild(persistCanvas);
         const box = $('cam-box');
-        if (box) { box.style.height = '170px'; box.style.display = 'flex'; box.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:13px">Cámara inactiva</span>'; }
+        if (box) {
+          box.style.cssText = 'background:#111;border-radius:12px;height:170px;display:flex;align-items:center;justify-content:center;margin-bottom:10px';
+          box.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:13px">Cámara inactiva</span>';
+        }
       }
     };
 
@@ -1126,16 +1161,28 @@ function buildScanner(room, isAdmin) {
 }
 
 function tickScan(video, canvas) {
-  if (!video || video.readyState < 2) { rafId = requestAnimationFrame(() => tickScan(video, canvas)); return; }
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-  ctx.drawImage(video, 0, 0);
+  // Wait until video has actual dimensions
+  if (!video || video.readyState < 2 || video.videoWidth === 0) {
+    rafId = requestAnimationFrame(() => tickScan(video, canvas));
+    return;
+  }
+  if (!canvas) { rafId = requestAnimationFrame(() => tickScan(video, canvas)); return; }
+
   try {
-    const img  = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-    if (code?.data) handleScan(code.data);
-  } catch {}
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // Try both inversion modes for better detection
+    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+    if (code && code.data && code.data.trim()) {
+      handleScan(code.data.trim());
+    }
+  } catch(e) {
+    // ignore frame errors
+  }
   rafId = requestAnimationFrame(() => tickScan(video, canvas));
 }
 
