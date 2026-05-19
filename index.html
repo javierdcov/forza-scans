@@ -312,26 +312,26 @@ const getFirestore             = () => firebase.firestore();
 const serverTimestamp          = () => firebase.firestore.FieldValue.serverTimestamp();
 const arrayUnion               = (...args) => firebase.firestore.FieldValue.arrayUnion(...args);
 
-// Firestore path helpers — compat SDK uses chained .collection().doc()
-function doc(db, ...pathSegs) {
-  // pathSegs alternates: col, docId, col, docId...
-  // e.g. doc(db, 'col', 'id') or doc(db, 'col', 'id', 'subcol', 'subid')
+// Firestore path helpers — compat SDK chained .collection().doc()
+// Path segments alternate: collectionName, docId, collectionName, docId...
+// doc()        ends on a docId      (even number of segments from db)
+// collection() ends on a collection (odd number of segments from db)
+function _buildRef(db, segs) {
   let ref = db;
-  for (let i = 0; i < pathSegs.length; i++) {
-    if (i % 2 === 0) ref = ref.collection(pathSegs[i]);
-    else             ref = ref.doc(pathSegs[i]);
+  for (let i = 0; i < segs.length; i++) {
+    ref = (i % 2 === 0) ? ref.collection(segs[i]) : ref.doc(segs[i]);
   }
   return ref;
 }
-function collection(db, ...pathSegs) {
-  // e.g. collection(db, 'col') or collection(db, 'col', 'id', 'subcol')
-  let ref = db;
-  for (let i = 0; i < pathSegs.length; i++) {
-    if (i % 2 === 0) ref = ref.collection(pathSegs[i]);
-    else             ref = ref.doc(pathSegs[i]);
+// doc() - if called with just a CollectionReference (no extra segs), returns a new auto-id doc
+function doc(dbOrRef, ...segs) {
+  if (segs.length === 0) {
+    // Called as doc(collectionRef) - generate new doc with auto ID
+    return dbOrRef.doc();
   }
-  return ref;
+  return _buildRef(dbOrRef, segs);
 }
+function collection(db, ...segs) { return _buildRef(db, segs); }
 const setDoc     = (ref, data, opts) => opts && opts.merge ? ref.set(data, {merge:true}) : ref.set(data);
 const updateDoc  = (ref, data) => ref.update(data);
 const getDoc     = (ref) => ref.get();
