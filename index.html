@@ -984,6 +984,12 @@ function showModal(html, room) {
   }
   m.innerHTML = `<div class="modal-box">${html}</div>`;
   m.style.display = 'flex';
+  // Re-expose globals after innerHTML update so inline onclick works in module context
+  m.querySelectorAll('button[onclick]').forEach(btn => {
+    const fn = btn.getAttribute('onclick');
+    btn.removeAttribute('onclick');
+    btn.addEventListener('click', () => { try { eval(fn); } catch(e) { console.error(e); } });
+  });
 }
 
 window.closeModal = () => {
@@ -1161,33 +1167,32 @@ function buildScanner(room, isAdmin) {
 }
 
 function tickScan(video, canvas) {
-  // Wait until video has actual dimensions
-  if (!video || video.readyState < 2 || video.videoWidth === 0) {
-    rafId = requestAnimationFrame(() => tickScan(video, canvas));
-    return;
-  }
-  if (!canvas) { rafId = requestAnimationFrame(() => tickScan(video, canvas)); return; }
-
-  try {
-    canvas.width  = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    // Try both inversion modes for better detection
-    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
-    if (code && code.data && code.data.trim()) {
-      handleScan(code.data.trim());
-    }
-  } catch(e) {
-    // ignore frame errors
-  }
-  rafId = requestAnimationFrame(() => tickScan(video, canvas));
+  // Use setInterval at ~10fps — more reliable than rAF inside module scripts
+  // and gives jsQR enough time per frame on mobile
+  if (rafId) clearInterval(rafId);
+  
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  
+  rafId = setInterval(() => {
+    if (!video || video.readyState < 2 || video.videoWidth === 0 || video.paused) return;
+    try {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (w === 0 || h === 0) return;
+      canvas.width  = w;
+      canvas.height = h;
+      ctx.drawImage(video, 0, 0, w, h);
+      const imageData = ctx.getImageData(0, 0, w, h);
+      const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+      if (code && code.data && code.data.trim()) {
+        handleScan(code.data.trim());
+      }
+    } catch(e) { /* ignore frame errors */ }
+  }, 100); // 10 frames per second — fast enough for QR, light on CPU
 }
 
 function stopCamera() {
-  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  if (rafId) { clearInterval(rafId); rafId = null; }
   if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
 }
 
