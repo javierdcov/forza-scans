@@ -275,6 +275,11 @@ input:checked + .swss::before { transform:translateX(12px) }
 .add-admin-block { background:var(--surface2); border-radius:var(--r); padding:12px; margin-bottom:10px }
 .export-box { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--rl); padding:14px; margin-bottom:10px }
 
+/* ── SHIFT CONFIG (room admin) ── */
+.shift-config-card { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--r); margin-bottom:8px; overflow:hidden }
+.shift-config-hdr { display:flex; align-items:center; padding:10px 12px; background:var(--surface2) }
+.shift-config-times { display:flex; align-items:center; padding:8px 12px; flex-wrap:wrap; gap:4px }
+
 </style>
 </head>
 <body>
@@ -770,11 +775,21 @@ function buildShiftBar(room, isAdmin) {
   const bar = el('div', 'shift-bar-wrap');
   if (!room) return bar;
 
-  const SHIFTS = [
+  const SHIFTS_ALL = [
     { id: 'desayuno', name: 'Desayuno', emoji: '🌅', defaultStart: '07:00', defaultEnd: '10:00' },
     { id: 'comida',   name: 'Comida',   emoji: '☀️',  defaultStart: '13:00', defaultEnd: '16:00' },
     { id: 'cena',     name: 'Cena',     emoji: '🌙',  defaultStart: '19:00', defaultEnd: '22:00' },
   ];
+
+  // Filter shifts based on room's shiftConfig
+  const roomShiftCfg = room?.shiftConfig || {};
+  const SHIFTS = SHIFTS_ALL.filter(s => {
+    const cfg = roomShiftCfg[s.id];
+    return cfg === undefined || cfg.enabled !== false;
+  }).map(s => {
+    const cfg = roomShiftCfg[s.id] || {};
+    return { ...s, defaultStart: cfg.start || s.defaultStart, defaultEnd: cfg.end || s.defaultEnd };
+  });
 
   const todayShifts = state.shifts; // already filtered to today
   const pills = el('div', 'shift-pills');
@@ -839,8 +854,8 @@ window.confirmOpenShift = async (defId, name, emoji) => {
   await setDoc(shiftRef, {
     shiftKey:      defId,
     name, emoji,
-    start:         $('sh-start').value,
-    end:           $('sh-end').value,
+    start:         $('sh-start')?.value || '',
+    end:           $('sh-end')?.value || '',
     expectedCount: Number($('sh-expected').value),
     status:        'open',
     openedAt:      timeNow(),
@@ -1249,6 +1264,67 @@ function buildRoomAdmin(room) {
   wrap.appendChild(pinLabel);
   const pinRow = el('div', 'mrow', `<input class="minput" id="room-pin-input" type="password" maxlength="6" value="${room?.pin || ''}" placeholder="PIN numérico"/><button class="mbtn" id="save-room-pin">Guardar</button>`);
   wrap.appendChild(pinRow);
+
+  // Shift configuration
+  const shiftDiv0 = el('div', 'sdiv'); wrap.appendChild(shiftDiv0);
+  const shiftConfigLabel = el('div', 'sl', 'TURNOS ACTIVOS EN ESTE COMEDOR');
+  wrap.appendChild(shiftConfigLabel);
+  const shiftNote = el('div', 'ibar ibar-b', 'Activa o desactiva los turnos para este comedor y ajusta sus horarios por defecto.');
+  wrap.appendChild(shiftNote);
+
+  const SHIFT_DEFS_LOCAL = [
+    { id: 'desayuno', name: 'Desayuno', emoji: '🌅', defaultStart: '07:00', defaultEnd: '10:00' },
+    { id: 'comida',   name: 'Comida',   emoji: '☀️',  defaultStart: '13:00', defaultEnd: '16:00' },
+    { id: 'cena',     name: 'Cena',     emoji: '🌙',  defaultStart: '19:00', defaultEnd: '22:00' },
+  ];
+
+  const roomShifts = room?.shiftConfig || {};
+
+  SHIFT_DEFS_LOCAL.forEach(def => {
+    const cfg = roomShifts[def.id] || { enabled: true, start: def.defaultStart, end: def.defaultEnd };
+    const shiftCard = el('div', 'shift-config-card');
+
+    // Header row with toggle
+    const shiftHdr = el('div', 'shift-config-hdr');
+    shiftHdr.innerHTML = `<span style="font-size:15px;margin-right:6px">${def.emoji}</span><span style="flex:1;font-size:13px;font-weight:600">${def.name}</span>`;
+    const tog = buildToggle(cfg.enabled !== false, async val => {
+      const newCfg = JSON.parse(JSON.stringify(room.shiftConfig || {}));
+      if (!newCfg[def.id]) newCfg[def.id] = { enabled: true, start: def.defaultStart, end: def.defaultEnd };
+      newCfg[def.id].enabled = val;
+      await updateDoc(roomDocRef(room.id), { shiftConfig: newCfg });
+    });
+    shiftHdr.appendChild(tog);
+    shiftCard.appendChild(shiftHdr);
+
+    // Time inputs
+    const timeRow = el('div', 'shift-config-times');
+    timeRow.innerHTML = `
+      <span style="font-size:11px;color:var(--text2);margin-right:6px">Horario:</span>
+      <input class="add-input" id="shift-start-${def.id}" type="time" value="${cfg.start || def.defaultStart}" style="width:90px"/>
+      <span style="font-size:11px;color:var(--text2);margin:0 4px">a</span>
+      <input class="add-input" id="shift-end-${def.id}" type="time" value="${cfg.end || def.defaultEnd}" style="width:90px"/>
+      <button class="add-go" id="shift-save-${def.id}" style="margin-left:6px">Guardar</button>`;
+    shiftCard.appendChild(timeRow);
+    wrap.appendChild(shiftCard);
+  });
+
+  // Wire shift time save buttons
+  setTimeout(() => {
+    SHIFT_DEFS_LOCAL.forEach(def => {
+      const saveBtn = document.getElementById(\`shift-save-\${def.id}\`);
+      if (saveBtn) saveBtn.onclick = async () => {
+        const start = document.getElementById(\`shift-start-\${def.id}\`)?.value;
+        const end   = document.getElementById(\`shift-end-\${def.id}\`)?.value;
+        const newCfg = JSON.parse(JSON.stringify(room.shiftConfig || {}));
+        if (!newCfg[def.id]) newCfg[def.id] = { enabled: true };
+        newCfg[def.id].start = start;
+        newCfg[def.id].end   = end;
+        await updateDoc(roomDocRef(room.id), { shiftConfig: newCfg });
+        const btn = document.getElementById(\`shift-save-\${def.id}\`);
+        if (btn) { btn.textContent = '✓'; setTimeout(() => { btn.textContent = 'Guardar'; }, 1500); }
+      };
+    });
+  }, 100);
 
   // File upload
   const div = el('div', 'sdiv'); wrap.appendChild(div);
