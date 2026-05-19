@@ -291,8 +291,7 @@ input:checked + .swss::before { transform:translateX(12px) }
   </div>
 </div>
 <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
-<!-- ZXing library — two CDN attempts for compatibility -->
-<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js" onerror="console.warn('[QR] ZXing CDN 1 failed')"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js" onerror="console.warn('[QR] ZXing CDN failed')"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
@@ -1175,8 +1174,10 @@ function buildScanner(room, isAdmin) {
           const constraints = {
             video: {
               facingMode: { ideal: 'environment' },
-              width:  { ideal: 1280 },
-              height: { ideal: 720 }
+              width:  { ideal: 1920 },
+              height: { ideal: 1080 },
+              focusMode: { ideal: 'continuous' },
+              zoom: { ideal: 1 }
             }
           };
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -1196,6 +1197,15 @@ function buildScanner(room, isAdmin) {
             vid.style.cssText = 'width:100%;display:block';
             vid.srcObject = stream;
             box.appendChild(vid);
+            // Enable continuous autofocus if supported
+            try {
+              const track = stream.getVideoTracks()[0];
+              const caps = track.getCapabilities ? track.getCapabilities() : {};
+              if (caps.focusMode && caps.focusMode.includes('continuous')) {
+                await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+                console.log('[CAM] Continuous autofocus enabled');
+              }
+            } catch(e) { /* autofocus not supported */ }
             const overlay = document.createElement('div');
             overlay.className = 'scan-overlay';
             overlay.innerHTML = '<div class="scan-frame"><div class="scan-line"></div></div>';
