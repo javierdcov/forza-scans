@@ -290,23 +290,59 @@ input:checked + .swss::before { transform:translateX(12px) }
     <div class="splash-loading">Cargando…</div>
   </div>
 </div>
+<!-- jsQR and XLSX -->
 <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script type="module">
+<!-- Firebase compat SDK (global scope — no modules needed) -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<!-- App (regular script — full global scope, no module isolation) -->
+<script>
 // ═══════════════════════════════════════════════════════════════
-//  FORZA ACCESO — app.js  (main module)
+//  FORZA SCANS — app.js  (Firebase compat SDK, global scope)
 // ═══════════════════════════════════════════════════════════════
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-import {
-  getAuth, signInWithEmailAndPassword, signOut,
-  createUserWithEmailAndPassword, onAuthStateChanged,
-  updatePassword, EmailAuthProvider, reauthenticateWithCredential,
-  multiFactor, TotpMultiFactorGenerator
-} from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import {
-  getFirestore, doc, collection, onSnapshot, setDoc, updateDoc,
-  getDoc, getDocs, deleteDoc, serverTimestamp, arrayUnion, query, where
-} from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+// Firebase compat SDK loaded via script tags — all APIs on window.firebase
+const initializeApp            = firebase.initializeApp.bind(firebase);
+const getAuth                  = () => firebase.auth();
+const signInWithEmailAndPassword = (auth, email, pass) => firebase.auth().signInWithEmailAndPassword(email, pass);
+const signOut                  = () => firebase.auth().signOut();
+const createUserWithEmailAndPassword = (auth, email, pass) => firebase.auth().createUserWithEmailAndPassword(email, pass);
+const onAuthStateChanged       = (auth, cb) => firebase.auth().onAuthStateChanged(cb);
+const reauthenticateWithCredential = (user, cred) => user.reauthenticateWithCredential(cred);
+const EmailAuthProvider        = firebase.auth.EmailAuthProvider;
+const getFirestore             = () => firebase.firestore();
+const serverTimestamp          = () => firebase.firestore.FieldValue.serverTimestamp();
+const arrayUnion               = (...args) => firebase.firestore.FieldValue.arrayUnion(...args);
+
+// Firestore path helpers — compat SDK uses chained .collection().doc()
+function doc(db, ...pathSegs) {
+  // pathSegs alternates: col, docId, col, docId...
+  // e.g. doc(db, 'col', 'id') or doc(db, 'col', 'id', 'subcol', 'subid')
+  let ref = db;
+  for (let i = 0; i < pathSegs.length; i++) {
+    if (i % 2 === 0) ref = ref.collection(pathSegs[i]);
+    else             ref = ref.doc(pathSegs[i]);
+  }
+  return ref;
+}
+function collection(db, ...pathSegs) {
+  // e.g. collection(db, 'col') or collection(db, 'col', 'id', 'subcol')
+  let ref = db;
+  for (let i = 0; i < pathSegs.length; i++) {
+    if (i % 2 === 0) ref = ref.collection(pathSegs[i]);
+    else             ref = ref.doc(pathSegs[i]);
+  }
+  return ref;
+}
+const setDoc     = (ref, data, opts) => opts && opts.merge ? ref.set(data, {merge:true}) : ref.set(data);
+const updateDoc  = (ref, data) => ref.update(data);
+const getDoc     = (ref) => ref.get();
+const getDocs    = (ref) => ref.get();
+const deleteDoc  = (ref) => ref.delete();
+const onSnapshot = (ref, cb) => ref.onSnapshot(cb);
+function query(ref, ...constraints) { let q = ref; constraints.forEach(c => { q = c(q); }); return q; }
+const where      = (field, op, val) => (ref) => ref.where(field, op, val);
 // Firebase config (inlined)
 const firebaseConfig = {
   apiKey:            "AIzaSyA5mtggr93SjIGNXs8FRgW-jv1Ls9RYmLY",
@@ -319,9 +355,9 @@ const firebaseConfig = {
 const DB_ROOT = "forza_eventos";
 
 // ── Init ──────────────────────────────────────────────────────
-const fbApp  = initializeApp(firebaseConfig);
-const auth   = getAuth(fbApp);
-const db     = getFirestore(fbApp);
+firebase.initializeApp(firebaseConfig);
+const auth   = firebase.auth();
+const db     = firebase.firestore();
 
 // Register service worker
 if ('serviceWorker' in navigator)
@@ -371,7 +407,7 @@ const shiftsColRef  = roomId => collection(db, DB_ROOT, 'current_event', 'rooms'
 const shiftDocRef   = (roomId, shiftId) => doc(db, DB_ROOT, 'current_event', 'rooms', roomId, 'shifts', shiftId);
 
 // ── Auth state ────────────────────────────────────────────────
-onAuthStateChanged(auth, async user => {
+auth.onAuthStateChanged(async user => {
   if (user) {
     state.authUser = user;
     const profileSnap = await getDoc(userDocRef(user.uid));
@@ -1723,7 +1759,7 @@ async function createAdminAccount() {
   const msg   = $('admin-msg');
   if (!email || !pass) { if (msg) { msg.className = 'ibar ibar-r'; msg.textContent = 'Email y contraseña requeridos.'; } return; }
   try {
-    const cred = await createUserWithEmailAndPassword(auth, email, pass);
+    const cred = await auth.createUserWithEmailAndPassword(email, pass);
     await setDoc(userDocRef(cred.user.uid), { email, name: name || email, role: 'admin', createdAt: serverTimestamp() });
     // Sign back in as master admin — user stays logged in because createUser auto-signs in
     // We store the new user profile but we need to re-auth as ourselves
@@ -1786,8 +1822,8 @@ function buildPinGate(onSuccess) {
       const pass = $('pin-input')?.value;
       if (!pass) return;
       try {
-        const cred = EmailAuthProvider.credential(state.authUser.email, pass);
-        await reauthenticateWithCredential(state.authUser, cred);
+        const cred = firebase.auth.EmailAuthProvider.credential(state.authUser.email, pass);
+        await state.authUser.reauthenticateWithCredential(cred);
         onSuccess();
       } catch {
         const errEl = $('pin-err');
@@ -1823,7 +1859,7 @@ function renderLogin() {
     const pass  = $('login-pass')?.value;
     const errEl = $('login-err');
     try {
-      await signInWithEmailAndPassword(auth, email, pass);
+      await auth.signInWithEmailAndPassword(email, pass);
     } catch (e) {
       if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Correo o contraseña incorrectos.'; }
     }
