@@ -1296,17 +1296,9 @@ function tickScan(video, canvas) {
       const imageData = ctx.getImageData(0, 0, vw, vh);
 
       if (reader) {
-        // ZXing path — handles high-density QR codes jsQR cannot decode
-        // getImageData returns RGBA (4 bytes/pixel); ZXing needs RGB (3 bytes/pixel)
+        // ZXing path — uses HTMLCanvasElementLuminanceSource (native canvas support)
         try {
-          const rgba = imageData.data;
-          const rgb  = new Uint8ClampedArray(vw * vh * 3);
-          for (let i = 0, j = 0; i < rgba.length; i += 4, j += 3) {
-            rgb[j]     = rgba[i];
-            rgb[j + 1] = rgba[i + 1];
-            rgb[j + 2] = rgba[i + 2];
-          }
-          const luminance = new ZXing.RGBLuminanceSource(rgb, vw, vh);
+          const luminance = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
           const binarized = new ZXing.HybridBinarizer(luminance);
           const bitmap    = new ZXing.BinaryBitmap(binarized);
           const result    = reader.decode(bitmap);
@@ -1315,7 +1307,7 @@ function tickScan(video, canvas) {
             handleScan(result.getText().trim());
           }
         } catch(e) {
-          // NotFoundException is thrown every frame when no QR is present — suppress it
+          // NotFoundException thrown every frame when no QR visible — suppress it
           if (!e.message?.includes('NotFoundException') && !e.name?.includes('NotFoundException')) {
             console.warn('[QR] ZXing error:', e.message);
           }
