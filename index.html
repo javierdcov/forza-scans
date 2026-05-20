@@ -1177,10 +1177,8 @@ function buildScanner(room, isAdmin) {
           const constraints = {
             video: {
               facingMode: { ideal: 'environment' },
-              width:  { ideal: 1920 },
-              height: { ideal: 1080 },
-              focusMode: { ideal: 'continuous' },
-              zoom: { ideal: 1 }
+              width:  { ideal: 640 },
+              height: { ideal: 480 },
             }
           };
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -1222,7 +1220,7 @@ function buildScanner(room, isAdmin) {
             const debugBar = document.createElement('div');
             debugBar.id = 'qr-debug';
             debugBar.style.cssText = 'position:absolute;top:8px;left:0;right:0;text-align:center;font-size:11px;color:rgba(255,255,0,0.9);font-weight:bold;z-index:10;padding:2px 8px';
-            const hasNative = false; // BarcodeDetector disabled — not supported on this device
+            const hasNative = typeof BarcodeDetector !== 'undefined';
             const hasZXing = typeof ZXing !== 'undefined' && ZXing.QRCodeReader;
             debugBar.textContent = hasNative ? '● Native BarcodeDetector' : hasZXing ? '● ZXing' : '● jsQR only';
             box.appendChild(debugBar);
@@ -1232,8 +1230,8 @@ function buildScanner(room, isAdmin) {
             toggle.textContent = 'Detener escáner';
             toggle.className = 'btn btn-ghost';
 
-            // Start scanning loop — pass live video by id lookup
-            tickScan(document.getElementById('qr-video-live'), persistCanvas);
+            // Start scanning loop
+            tickScan(vid, persistCanvas);
           }
         } catch(err) {
           console.error('Camera error:', err);
@@ -1264,16 +1262,13 @@ function buildScanner(room, isAdmin) {
 function tickScan(video, canvas) {
   if (rafId) clearInterval(rafId);
 
-  // Force jsQR — BarcodeDetector reports as available but throws
-  // 'Barcode Detection not implemented' on this device at runtime
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-  console.log('[QR] Starting scan. Engine: jsQR (forced)',
+  console.log('[QR] Starting scan. Engine: jsQR',
     '| video readyState:', video?.readyState,
     '| dimensions:', video?.videoWidth, 'x', video?.videoHeight);
 
   rafId = setInterval(() => {
-    // Always resolve the LIVE video element by id — handles rebuild case
     const liveVideo = document.getElementById('qr-video-live') || video;
     if (!liveVideo || liveVideo.readyState < 2 || liveVideo.videoWidth === 0 || liveVideo.paused) return;
 
@@ -1281,20 +1276,38 @@ function tickScan(video, canvas) {
       const vw = liveVideo.videoWidth;
       const vh = liveVideo.videoHeight;
 
-      // Full frame scan
-      canvas.width = vw; canvas.height = vh;
-      ctx.drawImage(liveVideo, 0, 0, vw, vh);
-      let imageData = ctx.getImageData(0, 0, vw, vh);
-      let code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+      // Try scanning in 4 orientations — Android can deliver rotated frames to canvas
+      const attempts = [
+        () => {
+          canvas.width = vw; canvas.height = vh;
+          ctx.drawImage(liveVideo, 0, 0, vw, vh);
+          return ctx.getImageData(0, 0, vw, vh);
+        },
+        () => {
+          canvas.width = vh; canvas.height = vw;
+          ctx.save(); ctx.translate(vh, 0); ctx.rotate(Math.PI / 2);
+          ctx.drawImage(liveVideo, 0, 0, vw, vh); ctx.restore();
+          return ctx.getImageData(0, 0, vh, vw);
+        },
+        () => {
+          canvas.width = vw; canvas.height = vh;
+          ctx.save(); ctx.translate(vw, vh); ctx.rotate(Math.PI);
+          ctx.drawImage(liveVideo, 0, 0, vw, vh); ctx.restore();
+          return ctx.getImageData(0, 0, vw, vh);
+        },
+        () => {
+          canvas.width = vh; canvas.height = vw;
+          ctx.save(); ctx.translate(0, vw); ctx.rotate(-Math.PI / 2);
+          ctx.drawImage(liveVideo, 0, 0, vw, vh); ctx.restore();
+          return ctx.getImageData(0, 0, vh, vw);
+        }
+      ];
 
-      // Center crop fallback (where the scan frame overlay sits)
-      if (!code) {
-        const cx = Math.floor(vw * 0.2), cy = Math.floor(vh * 0.2);
-        const cw = Math.floor(vw * 0.6), ch = Math.floor(vh * 0.6);
-        canvas.width = cw; canvas.height = ch;
-        ctx.drawImage(liveVideo, cx, cy, cw, ch, 0, 0, cw, ch);
-        imageData = ctx.getImageData(0, 0, cw, ch);
+      let code = null;
+      for (const attempt of attempts) {
+        const imageData = attempt();
         code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+        if (code?.data?.trim()) break;
       }
 
       if (code?.data?.trim()) {
@@ -1304,7 +1317,7 @@ function tickScan(video, canvas) {
     } catch (e) {
       console.warn('[QR] Frame error:', e.message);
     }
-  }, 150);
+  }, 200);
 }
 
 function stopCamera() {
@@ -1318,7 +1331,6 @@ async function handleScan(raw) {
   await processScan(raw);
   setTimeout(() => {
     scanCooldown = false;
-    // Trigger a clean rerender now that the result card has been visible
     rerender();
   }, 2800);
 }
