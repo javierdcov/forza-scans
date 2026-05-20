@@ -1338,17 +1338,14 @@ async function handleScan(raw) {
   if (scanCooldown) return;
   scanCooldown = true;
   await processScan(raw);
-  setTimeout(() => {
-    scanCooldown = false;
-    // Resume scanning — restart the interval on the existing live video
-    const liveVideo = document.getElementById('qr-video-live');
-    const persistCanvas = document.querySelector('canvas[style*="display: none"]') || document.createElement('canvas');
-    if (liveVideo) {
-      tickScan(liveVideo, persistCanvas);
-    } else {
-      rerender();
-    }
-  }, 2800);
+  // Stop camera and reset button — operator must press "Iniciar escáner" again
+  stopCamera();
+  const toggle = document.getElementById('scan-toggle');
+  if (toggle) {
+    toggle.textContent = 'Iniciar escáner';
+    toggle.className = 'btn btn-blue';
+  }
+  setTimeout(() => { scanCooldown = false; }, 2800);
 }
 
 function showScanResult(parsed, result) {
