@@ -154,6 +154,10 @@ a { color:var(--blue) }
 .rc.granted { background:var(--green-bg); border:1px solid var(--green-border) }
 .rc.denied { background:var(--red-bg); border:1px solid var(--red-border) }
 .rc.pending { background:var(--blue-bg); border:1px solid var(--blue) }
+.rc.duplicate { background:var(--amber-bg); border:1px solid var(--amber-border) }
+.duplicate .ri { background:var(--amber-border); color:#fff }
+.duplicate .rs { color:var(--amber-text) }
+.duplicate .rr { color:var(--amber-text) }
 .rh { display:flex; align-items:center; gap:8px; margin-bottom:7px }
 .ri { width:24px; height:24px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; flex-shrink:0 }
 .granted .ri { background:var(--green-border); color:#fff }
@@ -384,8 +388,15 @@ const el = (tag, cls, html) => {
   if (html !== undefined) e.innerHTML = html;
   return e;
 };
-const today = () => new Date().toISOString().slice(0, 10);
-const timeNow = () => new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+const today = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+const timeNow = () => new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const dateTimeNow = () => new Date().toLocaleString('es-MX', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 function geo() {
   if (!navigator.geolocation) return;
@@ -428,6 +439,7 @@ auth.onAuthStateChanged(async user => {
 function stopListeners() {
   state.unsubscribers.forEach(u => u());
   state.unsubscribers = [];
+  stopAutoCloseTimer();
 }
 
 function startListeners(roomId) {
@@ -563,6 +575,20 @@ async function processScan(raw) {
   const access  = room?.access || {};
   const result  = checkAccess(parsed, access);
 
+  // Duplicate check — same credential already scanned in this shift
+  if (parsed?.code) {
+    const openShift = getOpenShift();
+    const alreadyScanned = state.scans.find(s =>
+      s.type === 'scan' &&
+      s.parsed?.code === parsed.code &&
+      (openShift ? s.shiftId === openShift.id : s.day === today())
+    );
+    if (alreadyScanned) {
+      showScanResult(parsed, { result: 'duplicate', reason: `Ya registrado a las ${alreadyScanned.time}` });
+      return;
+    }
+  }
+
   if (parsed && result.result === 'pending' && deniedProfiles.has(profileKey(parsed))) {
     const ar = { result: 'denied', reason: 'Perfil rechazado anteriormente' };
     await writeScan(parsed, ar);
@@ -613,9 +639,9 @@ async function exportForzaCSV(roomId) {
   const room  = state.rooms.find(r => r.id === roomId);
   const snap  = await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(roomId).collection('scans').get();
   const scans = snap.docs.map(d => d.data()).filter(s => s.type === 'scan');
-  const rows  = [['Fecha','Turno','Hora','Resultado','Codigo','Nombre','Estado','Deporte','Categorias','Comedor','Lat','Lng']];
+  const rows  = [['Fecha','Turno','Hora','Fecha_Hora','Resultado','Codigo','Nombre','Estado','Deporte','Categorias','Comedor','Lat','Lng']];
   scans.forEach(s => rows.push([
-    s.day, s.shiftName, s.time, s.result?.result || '',
+    s.day, s.shiftName, s.time, (s.day && s.time ? `${s.day} ${s.time}` : ''), s.result?.result || '',
     s.parsed?.code || '', s.parsed?.name || '',
     s.parsed?.state || '', s.parsed?.sport || '',
     (s.parsed?.categories || []).join(' | '),
@@ -1072,6 +1098,36 @@ window.closeModal = () => {
   if (m) { m.style.display = 'none'; m.innerHTML = ''; }
 };
 
+// ── Log helpers ──────────────────────────────────────────────
+function renderLogEntries(container, openShift) {
+  const shiftScans = openShift ? state.scans.filter(s => s.shiftId === openShift.id) : state.scans;
+  if (shiftScans.length === 0) {
+    container.innerHTML = '<div class="lempty">Sin registros aún</div>';
+    return;
+  }
+  container.innerHTML = '';
+  shiftScans.slice(0, 40).forEach(sc => {
+    const li = el('div', 'li');
+    const res = sc.result?.result || 'unknown';
+    li.innerHTML = `
+      <div class="ld ${res === 'auto-added' ? 'granted' : res}"></div>
+      <div style="flex:1;min-width:0">
+        <div class="ln">${sc.parsed?.name || 'Desconocido'}</div>
+        <div class="lm">${sc.parsed?.sport || ''} · ${sc.parsed?.state || ''}</div>
+      </div>
+      <div class="ltime">${sc.time || ''}</div>`;
+    container.appendChild(li);
+  });
+}
+
+// Called after cooldown ends to update just the log without wiping the result card
+function refreshLog() {
+  const logWrap = document.getElementById('log-wrap');
+  if (!logWrap) return;
+  const openShift = getOpenShift();
+  renderLogEntries(logWrap, openShift);
+}
+
 // ── Scanner UI ────────────────────────────────────────────────
 let videoStream = null;
 let rafId = null;
@@ -1139,23 +1195,8 @@ function buildScanner(room, isAdmin) {
   wrap.appendChild(logTitle);
 
   const logWrap = el('div', '');
-  const shiftScans = openShift ? state.scans.filter(s => s.shiftId === openShift.id) : state.scans;
-  if (shiftScans.length === 0) {
-    logWrap.innerHTML = '<div class="lempty">Sin registros aún</div>';
-  } else {
-    shiftScans.slice(0, 40).forEach(sc => {
-      const li = el('div', 'li');
-      const res = sc.result?.result || 'unknown';
-      li.innerHTML = `
-        <div class="ld ${res === 'auto-added' ? 'granted' : res}"></div>
-        <div style="flex:1;min-width:0">
-          <div class="ln">${sc.parsed?.name || 'Desconocido'}</div>
-          <div class="lm">${sc.parsed?.sport || ''} · ${sc.parsed?.state || ''}</div>
-        </div>
-        <div class="ltime">${sc.time || ''}</div>`;
-      logWrap.appendChild(li);
-    });
-  }
+  logWrap.id = 'log-wrap';
+  renderLogEntries(logWrap, openShift);
   wrap.appendChild(logWrap);
 
   // Wire events after render
@@ -1338,6 +1379,12 @@ async function handleScan(raw) {
   if (scanCooldown) return;
   scanCooldown = true;
   await processScan(raw);
+
+  // For duplicate results: show the warning briefly, re-enable scanning quickly
+  // so the operator doesn't have to wait the full cooldown to scan the next person
+  const isDuplicate = document.querySelector('#result-area .rc.duplicate');
+  const cooldownMs = isDuplicate ? 1800 : 2800;
+
   // Fully reset to inactive state — camera off, overlay gone, button ready
   stopCamera();
   const box = document.getElementById('cam-box');
@@ -1350,18 +1397,19 @@ async function handleScan(raw) {
     toggle.textContent = 'Iniciar escáner';
     toggle.className = 'btn btn-blue';
   }
-  // Reset scanning flag so button works on next press
-  // We reach into the closure by dispatching a custom event
   const scanToggle = document.getElementById('scan-toggle');
   if (scanToggle) scanToggle.dataset.scanning = 'false';
-  setTimeout(() => { scanCooldown = false; }, 2800);
+  setTimeout(() => {
+    scanCooldown = false;
+    refreshLog(); // update list without wiping the result card
+  }, cooldownMs);
 }
 
 function showScanResult(parsed, result) {
   const area = $('result-area');
   if (!area) return;
-  const labels  = { granted: 'Acceso permitido', denied: 'Acceso denegado', 'auto-added': 'Aprobado y registrado' };
-  const icons   = { granted: '✓', denied: '✕', 'auto-added': '✓' };
+  const labels  = { granted: 'Acceso permitido', denied: 'Acceso denegado', 'auto-added': 'Aprobado y registrado', duplicate: 'Ya escaneado' };
+  const icons   = { granted: '✓', denied: '✕', 'auto-added': '✓', duplicate: '!' };
   const cls     = result.result === 'auto-added' ? 'granted' : result.result;
   area.innerHTML = `
     <div class="rc ${cls}">
@@ -1422,7 +1470,7 @@ function buildReports(room) {
       <div class="shift-record-header">
         <div>
           <div class="shift-record-title">${sh.emoji} ${sh.name} <span class="badge ${sh.status==='open'?'badge-green':sh.status==='closed'?'badge-blue':'badge-amber'}">${sh.status==='open'?'Abierto':sh.status==='closed'?'Cerrado':'Pendiente'}</span></div>
-          <div class="shift-record-meta">${sh.start}–${sh.end} · ${sh.day}${sh.openedAt ? ' · Abierto '+sh.openedAt : ''}${sh.closedAt ? ' · Cerrado '+sh.closedAt : ''}</div>
+          <div class="shift-record-meta">${sh.start}–${sh.end} · ${sh.day}${sh.openedAt ? ' · Abierto '+sh.openedAt : ''}${sh.closedAt ? ' · Cerrado '+sh.closedAt : ''}${sh.autoClosedReason ? ' · '+sh.autoClosedReason : ''}</div>
         </div>
       </div>
       <div class="stats-row-3">
@@ -1983,6 +2031,62 @@ function renderFirstSetup() {
   });
 }
 
+// ── Auto-close shift ─────────────────────────────────────────
+// Parses "HH:MM" into today's Date object, optionally offset by minutes
+function shiftTimeToDate(hhmm, day, offsetMinutes = 0) {
+  if (!hhmm || !day) return null;
+  const [h, m] = hhmm.split(':').map(Number);
+  const [y, mo, d] = day.split('-').map(Number);
+  const dt = new Date(y, mo - 1, d, h, m, 0, 0);
+  dt.setMinutes(dt.getMinutes() + offsetMinutes);
+  return dt;
+}
+
+async function autoCloseShiftIfNeeded() {
+  if (!state.activeRoomId || state.rooms.length === 0) return;
+  const openShift = state.shifts.find(s => s.status === 'open');
+  if (!openShift) return;
+
+  const now = new Date();
+  const nowDay = today(); // local date string
+
+  // Trigger 1: day has changed since the shift was opened
+  const dayChanged = openShift.day && openShift.day !== nowDay;
+
+  // Trigger 2: current time is >= end time + 60 minutes
+  const autoCloseTime = shiftTimeToDate(openShift.end, openShift.day, 60);
+  const pastAutoClose = autoCloseTime && now >= autoCloseTime;
+
+  if (!dayChanged && !pastAutoClose) return;
+
+  const reason = dayChanged ? 'Cierre automático — cambio de día' : 'Cierre automático — 1 hora después del fin de turno';
+  console.log(`[SHIFT] ${reason}:`, openShift.name);
+
+  try {
+    await updateDoc(shiftDocRef(state.activeRoomId, openShift.id), {
+      status:           'closed',
+      closedAt:         timeNow(),
+      autoClosedReason: reason,
+      location:         state.geo || null,
+    });
+  } catch(e) {
+    console.warn('[SHIFT] Auto-close failed:', e.message);
+  }
+}
+
+let autoCloseTimer = null;
+
+function startAutoCloseTimer() {
+  if (autoCloseTimer) clearInterval(autoCloseTimer);
+  // Check immediately on start, then every 60 seconds
+  autoCloseShiftIfNeeded();
+  autoCloseTimer = setInterval(autoCloseShiftIfNeeded, 60 * 1000);
+}
+
+function stopAutoCloseTimer() {
+  if (autoCloseTimer) { clearInterval(autoCloseTimer); autoCloseTimer = null; }
+}
+
 // ── Startup mode selector ─────────────────────────────────────
 function startApp() {
   geo(); // get location
@@ -1999,6 +2103,7 @@ function startApp() {
   state.view = 'scanner';
   state.appMode = isAdmin ? 'admin' : 'operator';
 
+  startAutoCloseTimer();
   rerender();
 }
 
