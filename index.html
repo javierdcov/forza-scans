@@ -1222,7 +1222,7 @@ function buildScanner(room, isAdmin) {
             const debugBar = document.createElement('div');
             debugBar.id = 'qr-debug';
             debugBar.style.cssText = 'position:absolute;top:8px;left:0;right:0;text-align:center;font-size:11px;color:rgba(255,255,0,0.9);font-weight:bold;z-index:10;padding:2px 8px';
-            const hasNative = typeof BarcodeDetector !== 'undefined';
+            const hasNative = false; // BarcodeDetector disabled — not supported on this device
             const hasZXing = typeof ZXing !== 'undefined' && ZXing.QRCodeReader;
             debugBar.textContent = hasNative ? '● Native BarcodeDetector' : hasZXing ? '● ZXing' : '● jsQR only';
             box.appendChild(debugBar);
@@ -1264,36 +1264,24 @@ function buildScanner(room, isAdmin) {
 function tickScan(video, canvas) {
   if (rafId) clearInterval(rafId);
 
-  // Prefer Native BarcodeDetector (faster, hardware-accelerated on Android)
-  const useNative = typeof BarcodeDetector !== 'undefined';
-  const detector = useNative ? new BarcodeDetector({ formats: ['qr_code'] }) : null;
+  // Force jsQR — BarcodeDetector reports as available but throws
+  // 'Barcode Detection not implemented' on this device at runtime
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-  console.log('[QR] Starting scan. Engine:', useNative ? 'BarcodeDetector' : 'jsQR',
+  console.log('[QR] Starting scan. Engine: jsQR (forced)',
     '| video readyState:', video?.readyState,
     '| dimensions:', video?.videoWidth, 'x', video?.videoHeight);
 
-  rafId = setInterval(async () => {
+  rafId = setInterval(() => {
     // Always resolve the LIVE video element by id — handles rebuild case
     const liveVideo = document.getElementById('qr-video-live') || video;
     if (!liveVideo || liveVideo.readyState < 2 || liveVideo.videoWidth === 0 || liveVideo.paused) return;
 
     try {
-      if (useNative) {
-        // BarcodeDetector: no canvas needed, works directly on video element
-        const barcodes = await detector.detect(liveVideo);
-        if (barcodes.length > 0 && barcodes[0].rawValue) {
-          console.log('[QR] BarcodeDetector hit:', barcodes[0].rawValue.substring(0, 50));
-          handleScan(barcodes[0].rawValue.trim());
-        }
-        return;
-      }
-
-      // jsQR fallback
       const vw = liveVideo.videoWidth;
       const vh = liveVideo.videoHeight;
 
-      // Full frame
+      // Full frame scan
       canvas.width = vw; canvas.height = vh;
       ctx.drawImage(liveVideo, 0, 0, vw, vh);
       let imageData = ctx.getImageData(0, 0, vw, vh);
