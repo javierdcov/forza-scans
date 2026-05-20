@@ -1163,8 +1163,6 @@ function buildScanner(room, isAdmin) {
     const toggle = $('scan-toggle');
     const manBtn = $('man-btn');
     const manIn  = $('man-input');
-    let scanning = false;
-
     // Create a persistent canvas that lives outside the camera box
     // so it never gets destroyed when we rebuild the box innerHTML
     const persistCanvas = document.createElement('canvas');
@@ -1172,6 +1170,8 @@ function buildScanner(room, isAdmin) {
     document.body.appendChild(persistCanvas);
 
     if (toggle) toggle.onclick = async () => {
+      // Use dataset.scanning so handleScan can reset it from outside this closure
+      const scanning = toggle.dataset.scanning === 'true';
       if (!scanning) {
         try {
           const constraints = {
@@ -1226,7 +1226,7 @@ function buildScanner(room, isAdmin) {
             box.appendChild(debugBar);
 
             await vid.play();
-            scanning = true;
+            toggle.dataset.scanning = 'true';
             toggle.textContent = 'Detener escáner';
             toggle.className = 'btn btn-ghost';
 
@@ -1239,7 +1239,7 @@ function buildScanner(room, isAdmin) {
         }
       } else {
         stopCamera();
-        scanning = false;
+        toggle.dataset.scanning = 'false';
         toggle.textContent = 'Iniciar escáner';
         toggle.className = 'btn btn-blue';
         // Remove the persistent canvas
@@ -1338,13 +1338,22 @@ async function handleScan(raw) {
   if (scanCooldown) return;
   scanCooldown = true;
   await processScan(raw);
-  // Stop camera and reset button — operator must press "Iniciar escáner" again
+  // Fully reset to inactive state — camera off, overlay gone, button ready
   stopCamera();
+  const box = document.getElementById('cam-box');
+  if (box) {
+    box.style.cssText = 'background:#111;border-radius:12px;height:170px;display:flex;align-items:center;justify-content:center;margin-bottom:10px';
+    box.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:13px">Cámara inactiva</span>';
+  }
   const toggle = document.getElementById('scan-toggle');
   if (toggle) {
     toggle.textContent = 'Iniciar escáner';
     toggle.className = 'btn btn-blue';
   }
+  // Reset scanning flag so button works on next press
+  // We reach into the closure by dispatching a custom event
+  const scanToggle = document.getElementById('scan-toggle');
+  if (scanToggle) scanToggle.dataset.scanning = 'false';
   setTimeout(() => { scanCooldown = false; }, 2800);
 }
 
