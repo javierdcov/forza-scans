@@ -1303,8 +1303,11 @@ function tickScan(video, canvas) {
           const bitmap    = new ZXing.BinaryBitmap(binarized);
           const result    = reader.decode(bitmap);
           if (result?.getText()?.trim()) {
-            console.log('[QR] ZXing hit:', result.getText().trim().substring(0, 50));
-            handleScan(result.getText().trim());
+            const raw = result.getText().trim();
+            console.log('[QR] ZXing hit:', raw);
+            // Stop scanning immediately to prevent double-scans
+            clearInterval(rafId); rafId = null;
+            handleScan(raw);
           }
         } catch(e) {
           // NotFoundException thrown every frame when no QR visible — suppress it
@@ -1337,7 +1340,14 @@ async function handleScan(raw) {
   await processScan(raw);
   setTimeout(() => {
     scanCooldown = false;
-    rerender();
+    // Resume scanning — restart the interval on the existing live video
+    const liveVideo = document.getElementById('qr-video-live');
+    const persistCanvas = document.querySelector('canvas[style*="display: none"]') || document.createElement('canvas');
+    if (liveVideo) {
+      tickScan(liveVideo, persistCanvas);
+    } else {
+      rerender();
+    }
   }, 2800);
 }
 
