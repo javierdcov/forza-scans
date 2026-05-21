@@ -383,7 +383,8 @@ let state = {
   rooms:        [],     // live array of room docs
   activeRoomId: null,   // which room this device is viewing
   scans:        [],     // live scans for active room (today)
-  shifts:       [],     // live shifts for active room (today)
+  shifts:       [],     // live shifts for active room (shiftsDate)
+  shiftsDate:   null,   // date shown in Turnos tab — null = today()
   appMode:      null,   // 'startup' | 'login' | 'operator' | 'admin'
   view:         'scanner', // current tab
   geo:          null,
@@ -486,7 +487,7 @@ function startListeners(roomId) {
 
   const roomBase = base.collection('rooms').doc(roomId);
 
-  // Scans for active room today
+  // Scans for active room — always today (for scanner/duplicate detection)
   const u3 = roomBase.collection('scans')
     .where('day', '==', today())
     .onSnapshot(snap => {
@@ -495,9 +496,10 @@ function startListeners(roomId) {
       rerender();
     });
 
-  // Shifts for active room today
+  // Shifts for active room — uses shiftsDate (may be a past date when browsing)
+  const shiftsDay = state.shiftsDate || today();
   const u4 = roomBase.collection('shifts')
-    .where('day', '==', today())
+    .where('day', '==', shiftsDay)
     .onSnapshot(snap => {
       state.shifts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       rerender();
@@ -770,6 +772,10 @@ function rerender() {
   // Don't rebuild the page while a scan result is on screen
   if (scanCooldown && state.view === 'scanner') return;
 
+  // Check auto-close on every state update (catches timer gaps from background/suspend)
+  // Only run when viewing today — state.shifts holds today's data only when shiftsDate is null
+  if (!state.shiftsDate) autoCloseShiftIfNeeded();
+
   const isAdmin = state.profile.role === 'master_admin' || state.profile.role === 'admin';
   const room    = state.rooms.find(r => r.id === state.activeRoomId);
 
@@ -899,6 +905,13 @@ function buildShiftStatusStrip(room) {
   return strip;
 }
 
+// ── Switch shifts date (restarts listener for that day) ───────
+function switchShiftsDate(dateStr) {
+  // dateStr = 'YYYY-MM-DD' or null for today
+  state.shiftsDate = dateStr || null;
+  startListeners(state.activeRoomId); // restarts with new date
+}
+
 // ── Shifts tab (full controls, admin only) ────────────────────
 function buildShiftsTab(room) {
   const wrap = el('div', '');
@@ -908,7 +921,27 @@ function buildShiftsTab(room) {
     return wrap;
   }
 
-  const title = el('div', 'sl', `TURNOS — ${room.name}`);
+  const todayStr    = today();
+  const selectedDay = state.shiftsDate || todayStr;
+  const isToday     = selectedDay === todayStr;
+
+  // ── Day selector ─────────────────────────────────────────────
+  const dayRow = el('div', '');
+  dayRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:12px';
+  dayRow.innerHTML = `
+    <button id="day-prev" style="padding:5px 10px;border:0.5px solid var(--border2);background:var(--surface);border-radius:var(--r);font-size:16px;cursor:pointer">‹</button>
+    <input id="day-picker" type="date" value="${selectedDay}" max="${todayStr}"
+      style="flex:1;padding:7px 10px;border:0.5px solid var(--border2);border-radius:var(--r);font-size:13px;background:var(--surface);color:var(--text);text-align:center"/>
+    <button id="day-next" style="padding:5px 10px;border:0.5px solid var(--border2);background:var(--surface);border-radius:var(--r);font-size:16px;cursor:pointer;opacity:${isToday?'0.3':'1'}" ${isToday?'disabled':''}>›</button>`;
+  wrap.appendChild(dayRow);
+
+  if (!isToday) {
+    const pastBanner = el('div', 'ibar ibar-b');
+    pastBanner.textContent = `Mostrando turnos del ${selectedDay}. Los controles están desactivados para días pasados.`;
+    wrap.appendChild(pastBanner);
+  }
+
+  const title = el('div', 'sl', `TURNOS — ${room.name}${isToday ? ' — HOY' : ' — '+selectedDay}`);
   wrap.appendChild(title);
 
   const SHIFTS_ALL = [
@@ -940,17 +973,23 @@ function buildShiftsTab(room) {
       <div class="sp-time">${sh?.start || def.defaultStart}–${sh?.end || def.defaultEnd}</div>
       <div class="sp-count">${(sh?.scanCount || 0)} scans</div>`;
 
-    const btn = el('button', `shift-btn shift-btn-${status}`);
-    btn.textContent = status === 'pending' ? 'Abrir' : status === 'open' ? 'Cerrar' : '✓';
-    btn.disabled = status === 'closed';
-    btn.onclick = () => status === 'pending' ? openShiftModal(def, sh, room) : closeShiftModal(sh, room);
-    pill.appendChild(btn);
+    if (isToday) {
+      const btn = el('button', `shift-btn shift-btn-${status}`);
+      btn.textContent = status === 'pending' ? 'Abrir' : status === 'open' ? 'Cerrar' : '✓';
+      btn.disabled = status === 'closed';
+      btn.onclick = () => status === 'pending' ? openShiftModal(def, sh, room) : closeShiftModal(sh, room);
+      pill.appendChild(btn);
+    } else {
+      const lbl = el('div', `shift-lbl shift-lbl-${status}`);
+      lbl.textContent = status === 'open' ? '● Abierto' : status === 'closed' ? '✓ Cerrado' : '— Sin datos';
+      pill.appendChild(lbl);
+    }
 
     pills.appendChild(pill);
   });
 
   const open = todayShifts.find(s => s.status === 'open');
-  if (open) {
+  if (open && isToday) {
     const notice = el('div', 'shift-notice');
     notice.textContent = `● Turno abierto: ${open.name}`;
     wrap.appendChild(notice);
@@ -960,7 +999,7 @@ function buildShiftsTab(room) {
   // Today's shift summary
   if (todayShifts.length > 0) {
     const divider = el('div', 'sdiv'); wrap.appendChild(divider);
-    const sumLabel = el('div', 'sl', 'RESUMEN DE HOY');
+    const sumLabel = el('div', 'sl', 'RESUMEN');
     wrap.appendChild(sumLabel);
 
     todayShifts.sort((a, b) => (a.shiftKey || '').localeCompare(b.shiftKey || '')).forEach(sh => {
@@ -983,7 +1022,33 @@ function buildShiftsTab(room) {
         </div>`;
       wrap.appendChild(card);
     });
+  } else if (!isToday) {
+    const empty = el('div', 'lempty', 'Sin turnos registrados para este día.');
+    wrap.appendChild(empty);
   }
+
+  // Wire day selector after DOM is ready
+  setTimeout(() => {
+    const picker = $('day-picker');
+    const prev   = $('day-prev');
+    const next   = $('day-next');
+
+    function stepDay(delta) {
+      const d = new Date(selectedDay + 'T12:00:00');
+      d.setDate(d.getDate() + delta);
+      const newStr = d.toISOString().slice(0, 10);
+      if (newStr > todayStr) return; // can't go past today
+      switchShiftsDate(newStr === todayStr ? null : newStr);
+    }
+
+    if (picker) picker.onchange = () => {
+      const v = picker.value;
+      if (!v || v > todayStr) return;
+      switchShiftsDate(v === todayStr ? null : v);
+    };
+    if (prev) prev.onclick = () => stepDay(-1);
+    if (next) next.onclick = () => stepDay(+1);
+  }, 0);
 
   return wrap;
 }
