@@ -368,6 +368,7 @@ const firebaseConfig = {
   appId:             "1:212292380447:web:d8dd6316dd52f00cd2322a"
 };
 const DB_ROOT = "forza_eventos";
+const OPERATOR_PASSWORD = "Fz#9mK$vX2@nQ8pL";
 
 // ── Init ──────────────────────────────────────────────────────
 firebase.initializeApp(firebaseConfig);
@@ -2204,8 +2205,9 @@ function renderLogin() {
     <div class="startup">
       <div class="startup-brand">Forza Scans</div>
       <div class="startup-title">Bienvenido</div>
-      <div class="startup-sub">Inicia sesión para continuar.</div>
-      <div class="login-form">
+
+      <div id="login-admin-block" class="login-form">
+        <div class="startup-sub" style="margin-bottom:16px">Acceso de administrador</div>
         <label class="form-label">Correo electrónico</label>
         <input class="minput" id="login-email" type="email" placeholder="tu@correo.com" style="width:100%;margin-bottom:10px"/>
         <label class="form-label">Contraseña</label>
@@ -2213,11 +2215,42 @@ function renderLogin() {
         <div id="login-err" class="ibar ibar-r" style="display:none;margin-bottom:10px"></div>
         <button class="startup-go" id="login-btn">Iniciar sesión</button>
       </div>
+
+      <div style="display:flex;gap:10px;margin-top:18px;width:100%;max-width:320px">
+        <button class="btn btn-ghost" id="show-op-login" style="flex:1;margin:0;font-size:13px">Soy operador</button>
+        <button class="btn btn-ghost" id="show-op-enroll" style="flex:1;margin:0;font-size:13px">Registrarme</button>
+      </div>
+
+      <div id="login-op-block" class="login-form" style="display:none;margin-top:18px">
+        <div class="startup-sub" style="margin-bottom:16px">Inicio de sesión — Operador</div>
+        <label class="form-label">Correo electrónico</label>
+        <input class="minput" id="op-login-email" type="email" placeholder="tu@correo.com" style="width:100%;margin-bottom:16px"/>
+        <div id="op-login-err" class="ibar ibar-r" style="display:none;margin-bottom:10px"></div>
+        <button class="startup-go" id="op-login-btn">Entrar</button>
+        <button class="btn btn-ghost" id="hide-op-login" style="margin-top:8px">Cancelar</button>
+      </div>
+
+      <div id="login-enroll-block" class="login-form" style="display:none;margin-top:18px">
+        <div class="startup-sub" style="margin-bottom:16px">Registro de operador</div>
+        <label class="form-label">Nombre</label>
+        <input class="minput" id="enroll-first" placeholder="Nombre" style="width:100%;margin-bottom:10px"/>
+        <label class="form-label">Apellido</label>
+        <input class="minput" id="enroll-last" placeholder="Apellido" style="width:100%;margin-bottom:10px"/>
+        <label class="form-label">Correo electrónico</label>
+        <input class="minput" id="enroll-email" type="email" placeholder="tu@correo.com" style="width:100%;margin-bottom:16px"/>
+        <div id="enroll-err" class="ibar ibar-r" style="display:none;margin-bottom:10px"></div>
+        <button class="startup-go" id="enroll-btn">Registrarme</button>
+        <button class="btn btn-ghost" id="hide-enroll" style="margin-top:8px">Cancelar</button>
+      </div>
+
     </div>`;
+
+  // Admin login
   const doLogin = async () => {
     const email = $('login-email')?.value.trim();
     const pass  = $('login-pass')?.value;
     const errEl = $('login-err');
+    if (errEl) errEl.style.display = 'none';
     try {
       await auth.signInWithEmailAndPassword(email, pass);
     } catch (e) {
@@ -2226,6 +2259,81 @@ function renderLogin() {
   };
   $('login-btn')?.addEventListener('click', doLogin);
   $('login-pass')?.addEventListener('keydown', e => e.key === 'Enter' && doLogin());
+
+  // Show/hide operator panels
+  $('show-op-login')?.addEventListener('click', () => {
+    $('login-op-block').style.display = 'block';
+    $('login-enroll-block').style.display = 'none';
+    $('login-admin-block').style.display = 'none';
+  });
+  $('show-op-enroll')?.addEventListener('click', () => {
+    $('login-enroll-block').style.display = 'block';
+    $('login-op-block').style.display = 'none';
+    $('login-admin-block').style.display = 'none';
+  });
+  $('hide-op-login')?.addEventListener('click', () => {
+    $('login-op-block').style.display = 'none';
+    $('login-admin-block').style.display = 'block';
+  });
+  $('hide-enroll')?.addEventListener('click', () => {
+    $('login-enroll-block').style.display = 'none';
+    $('login-admin-block').style.display = 'block';
+  });
+
+  // Operator login
+  const doOpLogin = async () => {
+    const email = $('op-login-email')?.value.trim();
+    const errEl = $('op-login-err');
+    if (errEl) errEl.style.display = 'none';
+    if (!email) return;
+    try {
+      await auth.signInWithEmailAndPassword(email, OPERATOR_PASSWORD);
+    } catch (e) {
+      if (errEl) {
+        errEl.style.display = 'block';
+        errEl.textContent = e.code === 'auth/user-not-found' || e.code === 'auth/wrong-password' || e.code === 'auth/invalid-credential'
+          ? 'Correo no registrado. Usa el botón "Registrarme".'
+          : 'Error al iniciar sesión. Intenta de nuevo.';
+      }
+    }
+  };
+  $('op-login-btn')?.addEventListener('click', doOpLogin);
+  $('op-login-email')?.addEventListener('keydown', e => e.key === 'Enter' && doOpLogin());
+
+  // Operator enrollment
+  const doEnroll = async () => {
+    const first = $('enroll-first')?.value.trim();
+    const last  = $('enroll-last')?.value.trim();
+    const email = $('enroll-email')?.value.trim();
+    const errEl = $('enroll-err');
+    if (errEl) errEl.style.display = 'none';
+    if (!first || !last || !email) {
+      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Completa todos los campos.'; }
+      return;
+    }
+    try {
+      const cred = await auth.createUserWithEmailAndPassword(email, OPERATOR_PASSWORD);
+      await db.collection('forza_users').doc(cred.user.uid).set({
+        email,
+        name:         `${first} ${last}`,
+        firstName:    first,
+        lastName:     last,
+        role:         'operator',
+        assignedRoom: null,
+        createdAt:    firebase.firestore.FieldValue.serverTimestamp(),
+      });
+      // onAuthStateChanged fires → startApp() called automatically
+    } catch (e) {
+      if (errEl) {
+        errEl.style.display = 'block';
+        errEl.textContent = e.code === 'auth/email-already-in-use'
+          ? 'Este correo ya está registrado. Usa "Soy operador" para entrar.'
+          : e.message;
+      }
+    }
+  };
+  $('enroll-btn')?.addEventListener('click', doEnroll);
+  $('enroll-email')?.addEventListener('keydown', e => e.key === 'Enter' && doEnroll());
 }
 
 // ── First setup (master admin profile creation) ───────────────
