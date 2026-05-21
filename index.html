@@ -822,7 +822,7 @@ function buildApp(isAdmin, room) {
   // Tab bar (admin only)
   if (isAdmin) {
     const tabs = el('div', 'tabs');
-    [['scanner','Escáner'],['shifts','Turnos'],['reports','Reportes'],['room-admin','Comedor'],['global-admin','Evento']].forEach(([id, label]) => {
+    [['scanner','Escáner'],['shifts','Turnos'],['operators','Operadores'],['reports','Reportes'],['room-admin','Comedor'],['global-admin','Evento']].forEach(([id, label]) => {
       const btn = el('button', `tab ${state.view === id ? 'on' : ''}`);
       btn.textContent = label;
       btn.onclick = () => { state.view = id; rerender(); };
@@ -835,7 +835,8 @@ function buildApp(isAdmin, room) {
   const pg = el('div', 'pg');
   if (state.view === 'scanner' || !isAdmin) pg.appendChild(buildScanner(room, isAdmin));
   else if (state.view === 'shifts')         pg.appendChild(buildShiftsTab(room));
-  else if (state.view === 'reports')        pg.appendChild(buildReports(room));
+ else if (state.view === 'operators')      pg.appendChild(buildOperatorsTab());
+else if (state.view === 'reports')        pg.appendChild(buildReports(room));
   else if (state.view === 'room-admin')     pg.appendChild(buildRoomAdmin(room));
   else if (state.view === 'global-admin')   pg.appendChild(buildGlobalAdmin());
   wrap.appendChild(pg);
@@ -1678,6 +1679,119 @@ function renderPendingCard(parsed, result) {
         '<div class="ibar ibar-a" style="margin-top:8px;margin-bottom:0">Contacta al administrador.</div>'}
     </div>`;
   window._decidePending = (action) => decidePending(action);
+}
+
+// ── Operators tab ─────────────────────────────────────────────
+async function buildOperatorsTab() {
+  const wrap = el('div', '');
+
+  const title = el('div', 'sl', 'OPERADORES REGISTRADOS');
+  wrap.appendChild(title);
+
+  const listWrap = el('div', '');
+  listWrap.id = 'operators-list';
+  wrap.appendChild(listWrap);
+
+  await refreshOperatorList(listWrap);
+  return wrap;
+}
+
+async function refreshOperatorList(container) {
+  container.innerHTML = '<div class="lempty">Cargando…</div>';
+  try {
+    const snap = await getDocs(usersColRef());
+    const operators = snap.docs
+      .map(d => ({ uid: d.id, ...d.data() }))
+      .filter(u => u.role === 'operator')
+      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+    if (operators.length === 0) {
+      container.innerHTML = '<div class="lempty">No hay operadores registrados aún.</div>';
+      return;
+    }
+
+    container.innerHTML = '';
+    operators.forEach(op => {
+      const assignedRoom = state.rooms.find(r => r.id === op.assignedRoom);
+      const li = el('div', 'li tappable');
+      li.innerHTML = `
+        <div class="ld" style="background:var(--amber)"></div>
+        <div style="flex:1;min-width:0">
+          <div class="ln">${op.name || op.email}</div>
+          <div class="lm">${op.email}</div>
+        </div>
+        <div class="ltime" style="text-align:right">
+          <div style="font-size:11px;color:var(--text2)">${assignedRoom ? assignedRoom.name : 'Sin comedor'}</div>
+        </div>
+        <div class="ledit">›</div>`;
+      li.onclick = () => showOperatorModal(op, container);
+      container.appendChild(li);
+    });
+  } catch (e) {
+    container.innerHTML = `<div class="lempty" style="color:var(--red-text)">Error al cargar operadores.</div>`;
+    console.error('[OPS]', e);
+  }
+}
+
+function showOperatorModal(op, listContainer) {
+  const assignedRoom = state.rooms.find(r => r.id === op.assignedRoom);
+  const roomOptions  = state.rooms.map(r =>
+    `<option value="${r.id}" ${r.id === op.assignedRoom ? 'selected' : ''}>${r.name}</option>`
+  ).join('');
+
+  showModal(`
+    <div class="modal-title">${op.name || op.email}</div>
+    <div class="modal-sub">${op.email}<br>Comedor actual: <strong>${assignedRoom ? assignedRoom.name : 'Sin asignar'}</strong></div>
+    <label class="form-label">Asignar comedor</label>
+    <select id="op-room-select" style="width:100%;padding:8px 10px;border:0.5px solid var(--border2);border-radius:var(--r);font-size:13px;margin-bottom:18px;background:var(--surface);color:var(--text)">
+      <option value="">— Sin comedor —</option>
+      ${roomOptions}
+    </select>
+    <div style="display:flex;gap:8px;margin-bottom:0">
+      <button class="btn-sm btn-sm-ghost" data-action="cancel" style="flex:1;padding:9px">Cancelar</button>
+      <button class="btn-sm btn-sm-blue" data-action="save-room" style="flex:1;padding:9px">Guardar</button>
+    </div>
+    <div style="height:0.5px;background:var(--border);margin:14px 0"></div>
+    <button class="btn-sm btn-sm-ghost" data-action="delete-op" style="width:100%;padding:9px;color:var(--red-text);border-color:var(--red-border)">🗑 Eliminar operador</button>`,
+    {
+      'cancel': () => closeModal(),
+
+      'save-room': async () => {
+        const roomId = $('op-room-select')?.value || null;
+        closeModal();
+        try {
+          await updateDoc(userDocRef(op.uid), { assignedRoom: roomId || null });
+          await refreshOperatorList(listContainer);
+        } catch (e) {
+          alert('Error al guardar: ' + e.message);
+        }
+      },
+
+      'delete-op': () => {
+        closeModal();
+        showModal(`
+          <div class="modal-title">Eliminar operador</div>
+          <div class="modal-sub">¿Eliminar a <strong>${op.name || op.email}</strong>?<br>Esta acción no se puede deshacer.</div>
+          <div style="display:flex;gap:8px;margin-top:4px">
+            <button class="btn-sm btn-sm-ghost" data-action="cancel" style="flex:1;padding:10px">Cancelar</button>
+            <button class="btn-sm btn-sm-red" data-action="confirm-delete-op" style="flex:1;padding:10px">Eliminar</button>
+          </div>`,
+          {
+            'cancel': () => closeModal(),
+            'confirm-delete-op': async () => {
+              closeModal();
+              try {
+                await deleteDoc(userDocRef(op.uid));
+                await refreshOperatorList(listContainer);
+              } catch (e) {
+                alert('Error al eliminar: ' + e.message);
+              }
+            }
+          }
+        );
+      }
+    }
+  );
 }
 
 // ── Reports UI ────────────────────────────────────────────────
