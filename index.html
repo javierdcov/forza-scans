@@ -203,6 +203,9 @@ a { color:var(--blue) }
 .ln { font-size:12px; font-weight:700 }
 .lm { font-size:11px; color:var(--text2) }
 .ltime { font-size:11px; color:var(--text3); margin-left:auto; flex-shrink:0; text-align:right }
+.li.tappable { cursor:pointer; transition:background .12s }
+.li.tappable:active { background:var(--surface2) }
+.ledit { font-size:11px; color:var(--text3); flex-shrink:0 }
 .lempty { text-align:center; color:var(--text3); font-size:13px; padding:24px 0 }
 
 /* ── INFO BARS ── */
@@ -1246,7 +1249,7 @@ window.closeModal = () => {
 };
 
 // ── Log helpers ──────────────────────────────────────────────
-function renderLogEntries(container, openShift) {
+function renderLogEntries(container, openShift, isAdmin) {
   const shiftScans = openShift ? state.scans.filter(s => s.shiftId === openShift.id) : state.scans;
   if (shiftScans.length === 0) {
     container.innerHTML = '<div class="lempty">Sin registros aún</div>';
@@ -1254,7 +1257,7 @@ function renderLogEntries(container, openShift) {
   }
   container.innerHTML = '';
   shiftScans.slice(0, 40).forEach(sc => {
-    const li = el('div', 'li');
+    const li = el('div', isAdmin ? 'li tappable' : 'li');
     const res = sc.result?.result || 'unknown';
     li.innerHTML = `
       <div class="ld ${res === 'auto-added' ? 'granted' : res}"></div>
@@ -1262,7 +1265,9 @@ function renderLogEntries(container, openShift) {
         <div class="ln">${sc.parsed?.name || 'Desconocido'}</div>
         <div class="lm">${sc.parsed?.sport || ''} · ${sc.parsed?.state || ''}</div>
       </div>
-      <div class="ltime">${sc.time || ''}</div>`;
+      <div class="ltime">${sc.time || ''}</div>
+      ${isAdmin ? '<div class="ledit">›</div>' : ''}`;
+    if (isAdmin) li.onclick = () => showScanEditModal(sc);
     container.appendChild(li);
   });
 }
@@ -1272,7 +1277,85 @@ function refreshLog() {
   const logWrap = document.getElementById('log-wrap');
   if (!logWrap) return;
   const openShift = getOpenShift();
-  renderLogEntries(logWrap, openShift);
+  const isAdmin = state.profile?.role === 'master_admin' || state.profile?.role === 'admin';
+  renderLogEntries(logWrap, openShift, isAdmin);
+}
+
+// ── Scan edit / delete modal ──────────────────────────────────
+function showScanEditModal(sc) {
+  const res      = sc.result?.result || 'unknown';
+  const resLabel = { granted: 'Permitido', denied: 'Denegado', 'auto-added': 'Aprobado', pending: 'Pendiente', duplicate: 'Duplicado', noshow: 'No-show' };
+  const resColor = { granted: 'var(--green-text)', denied: 'var(--red-text)', 'auto-added': 'var(--green-text)', pending: 'var(--blue-text)', duplicate: 'var(--amber-text)' };
+
+  const doEdit = async (newResult) => {
+    closeModal();
+    try {
+      const ref = doc(scansColRef(state.activeRoomId), sc.id);
+      await updateDoc(ref, { 'result.result': newResult, editedAt: timeNow(), editedBy: state.profile?.name || state.authUser?.email });
+    } catch(e) {
+      alert('Error al editar: ' + e.message);
+    }
+  };
+
+  const doDelete = async () => {
+    closeModal();
+    showModal(`
+      <div class="modal-title">Confirmar eliminación</div>
+      <div class="modal-sub">Ingresa tu contraseña para eliminar este registro. Esta acción no se puede deshacer.</div>
+      <div id="del-err" class="ibar ibar-r" style="display:none;margin-bottom:8px"></div>
+      <input class="pin-i" id="del-pass" type="password" placeholder="Contraseña" style="margin-bottom:10px"/>
+      <div style="display:flex;gap:8px">
+        <button class="btn-sm btn-sm-ghost" data-action="cancel">Cancelar</button>
+        <button class="btn-sm btn-sm-red" data-action="confirm-delete">Eliminar</button>
+      </div>`,
+      {
+        'cancel': () => closeModal(),
+        'confirm-delete': async () => {
+          const pass = $('del-pass')?.value;
+          if (!pass) return;
+          try {
+            const cred = firebase.auth.EmailAuthProvider.credential(state.authUser.email, pass);
+            await state.authUser.reauthenticateWithCredential(cred);
+            closeModal();
+            await deleteDoc(doc(scansColRef(state.activeRoomId), sc.id));
+          } catch(e) {
+            const errEl = $('del-err');
+            if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Contraseña incorrecta.'; }
+          }
+        }
+      }
+    );
+    setTimeout(() => $('del-pass')?.focus(), 50);
+  };
+
+  showModal(`
+    <div class="modal-title">Editar registro</div>
+    <div style="background:var(--surface2);border-radius:var(--r);padding:10px 12px;margin-bottom:14px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:2px">${sc.parsed?.name || 'Desconocido'}</div>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:4px">${sc.parsed?.code || ''}</div>
+      <div style="font-size:12px;color:var(--text2)">${sc.parsed?.sport || '\u00b7'} ${sc.parsed?.state || ''}</div>
+      <div style="font-size:11px;margin-top:6px">
+        Resultado actual: <strong style="color:${resColor[res] || 'var(--text)'}">${resLabel[res] || res}</strong>
+        &nbsp;·&nbsp; <span style="color:var(--text3)">${sc.time || ''}</span>
+      </div>
+    </div>
+    <div class="form-label">Cambiar resultado a</div>
+    <div style="display:flex;gap:6px;margin-bottom:14px">
+      <button class="btn-sm btn-sm-green" style="flex:1;padding:9px" data-action="set-granted">✓ Permitido</button>
+      <button class="btn-sm btn-sm-red" style="flex:1;padding:9px" data-action="set-denied">✕ Denegado</button>
+    </div>
+    <div style="height:0.5px;background:var(--border);margin-bottom:12px"></div>
+    <button class="btn-sm btn-sm-ghost" style="width:100%;padding:9px;color:var(--red-text);border-color:var(--red-border)" data-action="delete">🗑 Eliminar este registro</button>
+    <div style="margin-top:10px;text-align:right">
+      <button class="btn-sm btn-sm-ghost" data-action="cancel">Cancelar</button>
+    </div>`,
+    {
+      'cancel':      () => closeModal(),
+      'set-granted': () => doEdit('granted'),
+      'set-denied':  () => doEdit('denied'),
+      'delete':      () => doDelete(),
+    }
+  );
 }
 
 // ── Scanner UI ────────────────────────────────────────────────
@@ -1343,7 +1426,7 @@ function buildScanner(room, isAdmin) {
 
   const logWrap = el('div', '');
   logWrap.id = 'log-wrap';
-  renderLogEntries(logWrap, openShift);
+  renderLogEntries(logWrap, openShift, isAdmin);
   wrap.appendChild(logWrap);
 
   // Wire events after render
