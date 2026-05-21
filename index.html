@@ -96,8 +96,18 @@ a { color:var(--blue) }
 .tab { flex:1; padding:9px 4px; font-size:12px; font-weight:700; border:none; background:transparent; color:var(--text2); border-bottom:2px solid transparent; transition:all .15s }
 .tab.on { color:var(--blue); border-bottom-color:var(--blue) }
 
-/* ── SHIFT BAR ── */
-.shift-bar-wrap { background:var(--surface); border-bottom:0.5px solid var(--border); padding:10px 14px }
+/* ── SHIFT STATUS STRIP (read-only, always visible) ── */
+.shift-status-strip { background:var(--surface); border-bottom:0.5px solid var(--border); padding:7px 14px; display:flex; align-items:center; gap:8px; min-height:34px }
+.shift-status-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0 }
+.shift-status-dot.open { background:var(--green) }
+.shift-status-dot.closed { background:var(--text3) }
+.shift-status-dot.pending { background:var(--amber) }
+.shift-status-label { font-size:12px; font-weight:700; flex:1 }
+.shift-status-time { font-size:11px; color:var(--text2) }
+.shift-status-count { font-size:11px; color:var(--text3); margin-left:auto }
+
+/* ── SHIFT BAR (full controls, used in Turnos tab) ── */
+.shift-bar-wrap { }
 .shift-pills { display:flex; gap:8px }
 .shift-pill { flex:1; background:var(--surface2); border:0.5px solid var(--border); border-radius:var(--r); padding:8px; text-align:center; min-width:0 }
 .sp-name { font-size:11px; font-weight:700; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
@@ -796,13 +806,13 @@ function buildApp(isAdmin, room) {
     wrap.appendChild(rb);
   }
 
-  // Shift bar
-  wrap.appendChild(buildShiftBar(room, isAdmin));
+  // Shift status strip (read-only, always visible)
+  wrap.appendChild(buildShiftStatusStrip(room));
 
   // Tab bar (admin only)
   if (isAdmin) {
     const tabs = el('div', 'tabs');
-    [['scanner','Escáner'],['reports','Reportes'],['room-admin','Comedor'],['global-admin','Evento']].forEach(([id, label]) => {
+    [['scanner','Escáner'],['shifts','Turnos'],['reports','Reportes'],['room-admin','Comedor'],['global-admin','Evento']].forEach(([id, label]) => {
       const btn = el('button', `tab ${state.view === id ? 'on' : ''}`);
       btn.textContent = label;
       btn.onclick = () => { state.view = id; rerender(); };
@@ -814,6 +824,7 @@ function buildApp(isAdmin, room) {
   // Main content
   const pg = el('div', 'pg');
   if (state.view === 'scanner' || !isAdmin) pg.appendChild(buildScanner(room, isAdmin));
+  else if (state.view === 'shifts')         pg.appendChild(buildShiftsTab(room));
   else if (state.view === 'reports')        pg.appendChild(buildReports(room));
   else if (state.view === 'room-admin')     pg.appendChild(buildRoomAdmin(room));
   else if (state.view === 'global-admin')   pg.appendChild(buildGlobalAdmin());
@@ -848,10 +859,57 @@ async function switchRoom(roomId, isAdmin) {
   rerender();
 }
 
-// ── Shift bar ─────────────────────────────────────────────────
-function buildShiftBar(room, isAdmin) {
-  const bar = el('div', 'shift-bar-wrap');
-  if (!room) return bar;
+// ── Shift status strip (read-only, always visible above tabs) ────
+function buildShiftStatusStrip(room) {
+  const strip = el('div', 'shift-status-strip');
+  if (!room) return strip;
+
+  const open = state.shifts.find(s => s.status === 'open');
+  const anyToday = state.shifts.length > 0;
+
+  if (open) {
+    const dot = el('div', 'shift-status-dot open');
+    const label = el('div', 'shift-status-label');
+    label.textContent = `${open.emoji} ${open.name} — Abierto`;
+    const time = el('div', 'shift-status-time');
+    time.textContent = `${open.start}–${open.end}`;
+    const count = el('div', 'shift-status-count');
+    count.textContent = `${open.scanCount || 0} scans`;
+    strip.appendChild(dot);
+    strip.appendChild(label);
+    strip.appendChild(time);
+    strip.appendChild(count);
+  } else if (anyToday) {
+    const allClosed = state.shifts.every(s => s.status === 'closed');
+    const dot = el('div', `shift-status-dot ${allClosed ? 'closed' : 'pending'}`);
+    const label = el('div', 'shift-status-label');
+    label.textContent = allClosed ? 'Todos los turnos cerrados' : 'Sin turno abierto';
+    label.style.color = 'var(--text2)';
+    strip.appendChild(dot);
+    strip.appendChild(label);
+  } else {
+    const dot = el('div', 'shift-status-dot pending');
+    const label = el('div', 'shift-status-label');
+    label.textContent = 'Sin turno abierto';
+    label.style.color = 'var(--text2)';
+    strip.appendChild(dot);
+    strip.appendChild(label);
+  }
+
+  return strip;
+}
+
+// ── Shifts tab (full controls, admin only) ────────────────────
+function buildShiftsTab(room) {
+  const wrap = el('div', '');
+  if (!room) {
+    const warn = el('div', 'ibar ibar-a', 'No hay comedor seleccionado.');
+    wrap.appendChild(warn);
+    return wrap;
+  }
+
+  const title = el('div', 'sl', `TURNOS — ${room.name}`);
+  wrap.appendChild(title);
 
   const SHIFTS_ALL = [
     { id: 'desayuno', name: 'Desayuno', emoji: '🌅', defaultStart: '07:00', defaultEnd: '10:00' },
@@ -859,7 +917,6 @@ function buildShiftBar(room, isAdmin) {
     { id: 'cena',     name: 'Cena',     emoji: '🌙',  defaultStart: '19:00', defaultEnd: '22:00' },
   ];
 
-  // Filter shifts based on room's shiftConfig
   const roomShiftCfg = room?.shiftConfig || {};
   const SHIFTS = SHIFTS_ALL.filter(s => {
     const cfg = roomShiftCfg[s.id];
@@ -869,8 +926,9 @@ function buildShiftBar(room, isAdmin) {
     return { ...s, defaultStart: cfg.start || s.defaultStart, defaultEnd: cfg.end || s.defaultEnd };
   });
 
-  const todayShifts = state.shifts; // already filtered to today
+  const todayShifts = state.shifts;
   const pills = el('div', 'shift-pills');
+  pills.style.marginBottom = '12px';
 
   SHIFTS.forEach(def => {
     const sh = todayShifts.find(s => s.shiftKey === def.id);
@@ -882,17 +940,12 @@ function buildShiftBar(room, isAdmin) {
       <div class="sp-time">${sh?.start || def.defaultStart}–${sh?.end || def.defaultEnd}</div>
       <div class="sp-count">${(sh?.scanCount || 0)} scans</div>`;
 
-    if (isAdmin) {
-      const btn = el('button', `shift-btn shift-btn-${status}`);
-      btn.textContent = status === 'pending' ? 'Abrir' : status === 'open' ? 'Cerrar' : '✓';
-      btn.disabled = status === 'closed';
-      btn.onclick = () => status === 'pending' ? openShiftModal(def, sh, room) : closeShiftModal(sh, room);
-      pill.appendChild(btn);
-    } else {
-      const lbl = el('div', `shift-lbl shift-lbl-${status}`);
-      lbl.textContent = status === 'open' ? '● Abierto' : status === 'closed' ? '✓ Cerrado' : 'Pendiente';
-      pill.appendChild(lbl);
-    }
+    const btn = el('button', `shift-btn shift-btn-${status}`);
+    btn.textContent = status === 'pending' ? 'Abrir' : status === 'open' ? 'Cerrar' : '✓';
+    btn.disabled = status === 'closed';
+    btn.onclick = () => status === 'pending' ? openShiftModal(def, sh, room) : closeShiftModal(sh, room);
+    pill.appendChild(btn);
+
     pills.appendChild(pill);
   });
 
@@ -900,10 +953,39 @@ function buildShiftBar(room, isAdmin) {
   if (open) {
     const notice = el('div', 'shift-notice');
     notice.textContent = `● Turno abierto: ${open.name}`;
-    bar.appendChild(notice);
+    wrap.appendChild(notice);
   }
-  bar.appendChild(pills);
-  return bar;
+  wrap.appendChild(pills);
+
+  // Today's shift summary
+  if (todayShifts.length > 0) {
+    const divider = el('div', 'sdiv'); wrap.appendChild(divider);
+    const sumLabel = el('div', 'sl', 'RESUMEN DE HOY');
+    wrap.appendChild(sumLabel);
+
+    todayShifts.sort((a, b) => (a.shiftKey || '').localeCompare(b.shiftKey || '')).forEach(sh => {
+      const shiftScans = state.scans.filter(s => s.shiftId === sh.id);
+      const present = shiftScans.filter(s => s.type === 'scan' && (s.result?.result === 'granted' || s.result?.result === 'auto-added')).length;
+      const card = el('div', 'shift-record');
+      card.innerHTML = `
+        <div class="shift-record-header">
+          <div class="shift-record-title">${sh.emoji} ${sh.name}
+            <span class="badge ${sh.status==='open'?'badge-green':sh.status==='closed'?'badge-blue':'badge-amber'}">
+              ${sh.status==='open'?'Abierto':sh.status==='closed'?'Cerrado':'Pendiente'}
+            </span>
+          </div>
+          <div class="shift-record-meta">${sh.start}–${sh.end}${sh.openedAt ? ' · Abierto '+sh.openedAt : ''}${sh.closedAt ? ' · Cerrado '+sh.closedAt : ''}${sh.autoClosedReason ? ' · '+sh.autoClosedReason : ''}</div>
+        </div>
+        <div class="stats-row-3">
+          <div class="shift-stat"><div class="shift-stat-num" style="color:var(--green-text)">${present}</div><div class="shift-stat-label">Presentes</div></div>
+          <div class="shift-stat"><div class="shift-stat-num">${sh.expectedCount || 0}</div><div class="shift-stat-label">Garantizado</div></div>
+          <div class="shift-stat"><div class="shift-stat-num">${sh.scanCount || 0}</div><div class="shift-stat-label">Total scans</div></div>
+        </div>`;
+      wrap.appendChild(card);
+    });
+  }
+
+  return wrap;
 }
 
 // ── Shift modals ──────────────────────────────────────────────
