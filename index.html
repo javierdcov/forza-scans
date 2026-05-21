@@ -1661,11 +1661,37 @@ function showScanResult(parsed, result) {
       <div class="rr">${result.reason || ''}</div>
     </div>`;
 }
-
 function renderPendingCard(parsed, result) {
   const area = $('result-area');
   if (!area) return;
+  const room = state.rooms.find(r => r.id === state.activeRoomId);
   const isAdmin = state.profile?.role === 'master_admin' || state.profile?.role === 'admin';
+
+  // Admin sees approve/deny directly (existing behaviour)
+  if (isAdmin) {
+    area.innerHTML = `
+      <div class="rc pending">
+        <div class="rh"><div class="ri">?</div><div class="rs">Acreditado no registrado</div></div>
+        ${parsed ? `<div class="rname">${parsed.name}</div><div class="rcode">${parsed.code}</div>
+          <div class="pills">
+            ${parsed.state ? `<span class="pill pill-e">${parsed.state}</span>` : ''}
+            ${parsed.sport ? `<span class="pill pill-s">${parsed.sport}</span>` : ''}
+            ${(parsed.categories || []).slice(0,2).map(c => `<span class="pill pill-c">${c}</span>`).join('')}
+          </div>` : ''}
+        <div class="rr">${result.reason}</div>
+        <div class="pending-info">Al aprobar, este perfil se agrega al sistema. Todos los siguientes con el mismo deporte, estado y categoría pasarán automáticamente.</div>
+        <div class="decision-btns">
+          <button class="btn-sm btn-sm-green" onclick="window._decidePending('grant')">✓ Aprobar y agregar</button>
+          <button class="btn-sm btn-sm-red" onclick="window._decidePending('deny')">✕ Denegar</button>
+        </div>
+      </div>`;
+    window._decidePending = (action) => decidePending(action);
+    return;
+  }
+
+  // Operator view — PIN gate
+  const hasPin = room?.pin && room.pin.trim() !== '';
+
   area.innerHTML = `
     <div class="rc pending">
       <div class="rh"><div class="ri">?</div><div class="rs">Acreditado no registrado</div></div>
@@ -1676,15 +1702,78 @@ function renderPendingCard(parsed, result) {
           ${(parsed.categories || []).slice(0,2).map(c => `<span class="pill pill-c">${c}</span>`).join('')}
         </div>` : ''}
       <div class="rr">${result.reason}</div>
-      ${isAdmin ? `
-        <div class="pending-info">Al aprobar, este perfil se agrega al sistema. Todos los siguientes con el mismo deporte, estado y categoría pasarán automáticamente.</div>
-        <div class="decision-btns">
-          <button class="btn-sm btn-sm-green" onclick="window._decidePending('grant')">✓ Aprobar y agregar</button>
-          <button class="btn-sm btn-sm-red" onclick="window._decidePending('deny')">✕ Denegar</button>
-        </div>` :
-        '<div class="ibar ibar-a" style="margin-top:8px;margin-bottom:0">Contacta al administrador.</div>'}
+
+      ${!hasPin ? `
+        <div class="ibar ibar-r" style="margin-top:10px;margin-bottom:0">
+          ⚠️ No hay PIN configurado para este comedor. Un administrador debe establecer un PIN antes de poder aprobar perfiles desconocidos.
+        </div>` : `
+        <div class="pending-info">Muestra esta pantalla al administrador para que ingrese el PIN del comedor.</div>
+        <div style="margin-top:10px">
+          <input class="pin-i" id="pending-pin-input" type="password" placeholder="PIN del comedor" style="margin-bottom:6px"/>
+          <div id="pending-pin-err" class="ibar ibar-r" style="display:none;margin-bottom:6px;font-size:11px"></div>
+          <button class="btn-sm btn-sm-blue" style="width:100%;padding:9px" onclick="window._unlockPending()">Ingresar</button>
+        </div>
+        <div id="pending-decision-wrap" style="display:none">
+          <div class="pending-info" id="pending-timer-msg" style="margin-bottom:8px"></div>
+          <div class="decision-btns">
+            <button class="btn-sm btn-sm-green" onclick="window._decidePending('grant')">✓ Aprobar y agregar</button>
+            <button class="btn-sm btn-sm-red" onclick="window._decidePending('deny')">✕ Denegar</button>
+          </div>
+        </div>`}
     </div>`;
-  window._decidePending = (action) => decidePending(action);
+
+  if (!hasPin) return;
+
+  // Wire PIN unlock
+  let pinTimer = null;
+
+  window._unlockPending = () => {
+    const input  = $('pending-pin-input');
+    const errEl  = $('pending-pin-err');
+    const entered = input?.value || '';
+    if (entered !== room.pin) {
+      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'PIN incorrecto. Intenta de nuevo.'; }
+      if (input) input.value = '';
+      return;
+    }
+
+    // PIN correct — show decision buttons, hide PIN block, start timer
+    if (errEl) errEl.style.display = 'none';
+    const pinBlock = input?.closest('div[style]');
+    if (input) input.closest('div').style.display = 'none';
+
+    const decisionWrap = $('pending-decision-wrap');
+    const timerMsg     = $('pending-timer-msg');
+    if (decisionWrap) decisionWrap.style.display = 'block';
+
+    let secondsLeft = 30;
+    const tick = () => {
+      if (timerMsg) timerMsg.textContent = `Acceso de administrador activo — ${secondsLeft}s`;
+      if (secondsLeft <= 0) {
+        clearInterval(pinTimer);
+        // Hide decision buttons and restore PIN input
+        if (decisionWrap) decisionWrap.style.display = 'none';
+        // Re-render the card from scratch to reset state
+        renderPendingCard(parsed, result);
+        return;
+      }
+      secondsLeft--;
+    };
+    tick();
+    pinTimer = setInterval(tick, 1000);
+  };
+
+  window._decidePending = (action) => {
+    if (pinTimer) clearInterval(pinTimer);
+    decidePending(action);
+  };
+
+  // Allow Enter key on PIN input
+  setTimeout(() => {
+    $('pending-pin-input')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') window._unlockPending();
+    });
+  }, 0);
 }
 
 // ── Operators tab ─────────────────────────────────────────────
