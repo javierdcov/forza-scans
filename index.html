@@ -1290,7 +1290,7 @@ function showScanEditModal(sc) {
   const doEdit = async (newResult) => {
     closeModal();
     try {
-      const ref = doc(scansColRef(state.activeRoomId), sc.id);
+      const ref = scansColRef(state.activeRoomId).doc(sc.id);
       await updateDoc(ref, { 'result.result': newResult, editedAt: timeNow(), editedBy: state.profile?.name || state.authUser?.email });
     } catch(e) {
       alert('Error al editar: ' + e.message);
@@ -1317,7 +1317,7 @@ function showScanEditModal(sc) {
             const cred = firebase.auth.EmailAuthProvider.credential(state.authUser.email, pass);
             await state.authUser.reauthenticateWithCredential(cred);
             closeModal();
-            await deleteDoc(doc(scansColRef(state.activeRoomId), sc.id));
+            await deleteDoc(scansColRef(state.activeRoomId).doc(sc.id));
           } catch(e) {
             const errEl = $('del-err');
             if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Contraseña incorrecta.'; }
