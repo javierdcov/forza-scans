@@ -835,7 +835,13 @@ function buildApp(isAdmin, room) {
   const pg = el('div', 'pg');
   if (state.view === 'scanner' || !isAdmin) pg.appendChild(buildScanner(room, isAdmin));
   else if (state.view === 'shifts')         pg.appendChild(buildShiftsTab(room));
- else if (state.view === 'operators')      pg.appendChild(buildOperatorsTab());
+ else if (state.view === 'operators') {
+  const placeholder = el('div', '');
+  pg.appendChild(placeholder);
+  buildOperatorsTab().then(tabEl => {
+    placeholder.replaceWith(tabEl);
+  });
+}
 else if (state.view === 'reports')        pg.appendChild(buildReports(room));
   else if (state.view === 'room-admin')     pg.appendChild(buildRoomAdmin(room));
   else if (state.view === 'global-admin')   pg.appendChild(buildGlobalAdmin());
