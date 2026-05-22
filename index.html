@@ -313,6 +313,8 @@ input:checked + .swss::before { transform:translateX(12px) }
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://apis.google.com/js/api.js" async defer></script>
 <script>
 // ═══════════════════════════════════════════════════════════════
 //  FORZA SCANS — app.js  (Firebase compat SDK, global scope)
@@ -370,6 +372,11 @@ const firebaseConfig = {
 const DB_ROOT = "forza_eventos";
 const OPERATOR_PASSWORD = "Fz#9mK$vX2@nQ8pL";
 
+// ── Google API constants ──────────────────────────────────────
+const GOOGLE_CLIENT_ID = '212292380447-56t1rfshef2iqasnhcr312jdebi7hfmb.apps.googleusercontent.com';
+const GOOGLE_SCOPES    = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly';
+const SHEETS_API       = 'https://sheets.googleapis.com/v4/spreadsheets';
+
 // ── Init ──────────────────────────────────────────────────────
 firebase.initializeApp(firebaseConfig);
 const auth   = firebase.auth();
@@ -393,6 +400,8 @@ let state = {
   view:         'scanner', // current tab
   geo:          null,
   unsubscribers: [],
+  googleToken:  null,   // OAuth access token for Google APIs
+  googleTokenExpiry: 0, // timestamp when token expires
 };
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -1899,14 +1908,283 @@ function showOperatorModal(op, listContainer) {
   );
 }
 
+// ── Google API helpers ────────────────────────────────────────
+
+// Returns a valid access token, requesting one if needed or expired
+function getGoogleToken() {
+  return new Promise((resolve, reject) => {
+    const now = Date.now();
+    if (state.googleToken && now < state.googleTokenExpiry - 60000) {
+      resolve(state.googleToken);
+      return;
+    }
+    if (typeof google === 'undefined' || !google.accounts) {
+      reject(new Error('Google Identity Services no cargó. Verifica tu conexión.'));
+      return;
+    }
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope:     GOOGLE_SCOPES,
+      callback:  (resp) => {
+        if (resp.error) { reject(new Error(resp.error)); return; }
+        state.googleToken       = resp.access_token;
+        state.googleTokenExpiry = Date.now() + (resp.expires_in * 1000);
+        resolve(state.googleToken);
+      },
+    });
+    client.requestAccessToken({ prompt: state.googleToken ? '' : 'consent' });
+  });
+}
+
+// Open Google Drive Picker to select a Google Sheet — resolves {id, name}
+function pickGoogleSheet() {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const token = await getGoogleToken();
+      // Load Picker API if not already loaded
+      await new Promise(res => {
+        if (typeof gapi !== 'undefined' && gapi.picker) { res(); return; }
+        gapi.load('picker', res);
+      });
+      const view = new google.picker.DocsView(google.picker.ViewId.SPREADSHEETS)
+        .setIncludeFolders(false)
+        .setSelectFolderEnabled(false);
+      const picker = new google.picker.PickerBuilder()
+        .addView(view)
+        .setOAuthToken(token)
+        .setTitle('Selecciona la hoja de Google Sheets del evento')
+        .setCallback((data) => {
+          if (data.action === google.picker.Action.PICKED) {
+            const doc = data.docs[0];
+            resolve({ id: doc.id, name: doc.name });
+          } else if (data.action === google.picker.Action.CANCEL) {
+            reject(new Error('cancelled'));
+          }
+        })
+        .build();
+      picker.setVisible(true);
+    } catch(e) { reject(e); }
+  });
+}
+
+// Open Google Drive Picker to select any Excel/CSV file — resolves {id, name, mimeType}
+function pickDriveFile() {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const token = await getGoogleToken();
+      await new Promise(res => {
+        if (typeof gapi !== 'undefined' && gapi.picker) { res(); return; }
+        gapi.load('picker', res);
+      });
+      const view = new google.picker.DocsView()
+        .setIncludeFolders(false)
+        .setMimeTypes('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,application/vnd.google-apps.spreadsheet');
+      const picker = new google.picker.PickerBuilder()
+        .addView(view)
+        .setOAuthToken(token)
+        .setTitle('Selecciona el archivo de credenciales')
+        .setCallback((data) => {
+          if (data.action === google.picker.Action.PICKED) {
+            const doc = data.docs[0];
+            resolve({ id: doc.id, name: doc.name, mimeType: doc.mimeType });
+          } else if (data.action === google.picker.Action.CANCEL) {
+            reject(new Error('cancelled'));
+          }
+        })
+        .build();
+      picker.setVisible(true);
+    } catch(e) { reject(e); }
+  });
+}
+
+// Download a file from Drive by ID — for xlsx/csv credential imports
+async function downloadDriveFile(fileId, mimeType) {
+  const token = await getGoogleToken();
+  // If it's a Google Sheet, export as xlsx; otherwise download directly
+  const isGSheet = mimeType === 'application/vnd.google-apps.spreadsheet';
+  const url = isGSheet
+    ? `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+    : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!resp.ok) throw new Error(`Drive download failed: ${resp.status}`);
+  return await resp.arrayBuffer();
+}
+
+// Ensure a tab with the given name exists in the Sheet — creates it if missing
+// Returns the sheet (tab) ID
+async function ensureSheetTab(sheetId, tabName, token) {
+  // Get spreadsheet metadata
+  const metaResp = await fetch(`${SHEETS_API}/${sheetId}?fields=sheets.properties`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!metaResp.ok) throw new Error(`Sheets metadata failed: ${metaResp.status}`);
+  const meta = await metaResp.json();
+  const existing = (meta.sheets || []).find(s => s.properties.title === tabName);
+  if (existing) return existing.properties.sheetId;
+
+  // Create new tab
+  const addResp = await fetch(`${SHEETS_API}/${sheetId}:batchUpdate`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requests: [{ addSheet: { properties: { title: tabName } } }] })
+  });
+  if (!addResp.ok) throw new Error(`Failed to create tab: ${addResp.status}`);
+  const addData = await addResp.json();
+  const newSheetId = addData.replies[0].addSheet.properties.sheetId;
+
+  // Write header row
+  const headers = [['Fecha','Turno','Hora','Fecha_Hora','Resultado','Codigo','Nombre','Estado','Deporte','Categorias','Comedor','Lat','Lng']];
+  await fetch(`${SHEETS_API}/${sheetId}/values/${encodeURIComponent(tabName + '!A1')}:append?valueInputOption=RAW`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values: headers })
+  });
+  return newSheetId;
+}
+
+// Export unexported scans for one room to its tab in the master Sheet
+async function exportRoomToSheet(roomId, statusCallback) {
+  const room = state.rooms.find(r => r.id === roomId);
+  if (!room) throw new Error('Comedor no encontrado');
+
+  // Load sheetId from event doc
+  const eventSnap = await getDoc(eventDocRef());
+  const sheetId   = eventSnap.data()?.sheetId;
+  const sheetName = eventSnap.data()?.sheetName;
+  if (!sheetId) throw new Error('No hay hoja de Google Sheets configurada. Selecciona una primero.');
+
+  statusCallback?.('Conectando con Google…');
+  const token = await getGoogleToken();
+
+  statusCallback?.('Verificando pestaña del comedor…');
+  const tabName = room.name;
+  await ensureSheetTab(sheetId, tabName, token);
+
+  statusCallback?.('Buscando registros nuevos…');
+  // Query scans not yet exported
+  const snap = await db.collection('forza_eventos').doc('current_event')
+    .collection('rooms').doc(roomId)
+    .collection('scans')
+    .where('exportedToSheet', '!=', true)
+    .get();
+
+  const scans = snap.docs.map(d => ({ _id: d.id, ...d.data() })).filter(s => s.type === 'scan');
+
+  if (scans.length === 0) {
+    statusCallback?.('✓ Sin registros nuevos para exportar.');
+    return 0;
+  }
+
+  statusCallback?.(`Exportando ${scans.length} registros…`);
+  const rows = scans.map(s => [
+    s.day || '', s.shiftName || '', s.time || '',
+    (s.day && s.time ? `${s.day} ${s.time}` : ''),
+    s.result?.result || '', s.parsed?.code || '', s.parsed?.name || '',
+    s.parsed?.state || '', s.parsed?.sport || '',
+    (s.parsed?.categories || []).join(' | '),
+    room.name, s.geo?.lat || '', s.geo?.lng || ''
+  ]);
+
+  const appendResp = await fetch(
+    `${SHEETS_API}/${sheetId}/values/${encodeURIComponent(tabName + '!A1')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: rows })
+    }
+  );
+  if (!appendResp.ok) {
+    const err = await appendResp.json();
+    throw new Error(`Sheets append failed: ${err.error?.message || appendResp.status}`);
+  }
+
+  statusCallback?.('Marcando registros como exportados…');
+  // Batch-write exportedToSheet: true — Firestore batch max is 500
+  const batchSize = 400;
+  for (let i = 0; i < snap.docs.length; i += batchSize) {
+    const batch = db.batch();
+    snap.docs.slice(i, i + batchSize).forEach(d => {
+      if (d.data().type === 'scan') batch.update(d.ref, { exportedToSheet: true });
+    });
+    await batch.commit();
+  }
+
+  statusCallback?.(`✓ ${scans.length} registros exportados a "${sheetName}".`);
+  return scans.length;
+}
+
 // ── Reports UI ────────────────────────────────────────────────
 function buildReports(room) {
   const wrap = el('div', '');
   const title = el('div', 'sl', `REPORTES — ${room?.name || ''}`);
   wrap.appendChild(title);
 
+  // ── Google Sheets integration block ──────────────────────────
+  const gsCard = el('div', 'export-box');
+  gsCard.style.marginBottom = '14px';
+
+  const eventSheetId   = state.event?.sheetId   || null;
+  const eventSheetName = state.event?.sheetName || null;
+
+  gsCard.innerHTML = `
+    <div style="font-size:13px;font-weight:700;margin-bottom:4px">Google Sheets</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px;line-height:1.5">
+      ${eventSheetId
+        ? `Hoja vinculada: <strong>${eventSheetName || eventSheetId}</strong>`
+        : 'Sin hoja vinculada. Selecciona la hoja maestra del evento.'}
+    </div>
+    <div id="gs-status" class="ibar ibar-b" style="display:none;margin-bottom:8px"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn-sm btn-sm-blue" id="gs-pick-sheet" style="flex:1;padding:9px">
+        ${eventSheetId ? '🔗 Cambiar hoja' : '🔗 Seleccionar hoja'}
+      </button>
+      ${eventSheetId ? `<button class="btn-sm btn-sm-green" id="gs-export-btn" style="flex:1;padding:9px">↑ Exportar a Sheets</button>` : ''}
+    </div>`;
+  wrap.appendChild(gsCard);
+
+  // Wire Google Sheets buttons after render
+  setTimeout(() => {
+    const pickBtn   = document.getElementById('gs-pick-sheet');
+    const exportBtn = document.getElementById('gs-export-btn');
+    const statusEl  = document.getElementById('gs-status');
+
+    const showStatus = (msg, type = 'b') => {
+      if (!statusEl) return;
+      statusEl.className = `ibar ibar-${type}`;
+      statusEl.textContent = msg;
+      statusEl.style.display = 'block';
+    };
+
+    if (pickBtn) pickBtn.onclick = async () => {
+      try {
+        showStatus('Abriendo selector de Drive…');
+        const { id, name } = await pickGoogleSheet();
+        showStatus('Guardando configuración…');
+        await setDoc(eventDocRef(), { sheetId: id, sheetName: name }, { merge: true });
+        showStatus(`✓ Hoja vinculada: "${name}"`, 'g');
+        setTimeout(() => rerender(), 1200);
+      } catch(e) {
+        if (e.message !== 'cancelled') showStatus(`Error: ${e.message}`, 'r');
+        else statusEl.style.display = 'none';
+      }
+    };
+
+    if (exportBtn) exportBtn.onclick = async () => {
+      exportBtn.disabled = true;
+      try {
+        await exportRoomToSheet(room.id, msg => showStatus(msg));
+        showStatus(statusEl.textContent, 'g');
+      } catch(e) {
+        showStatus(`Error: ${e.message}`, 'r');
+      } finally {
+        exportBtn.disabled = false;
+      }
+    };
+  }, 0);
+
+  // ── Existing shift reports ────────────────────────────────────
   if (state.shifts.length === 0) {
-    wrap.innerHTML += '<div class="lempty">No hay turnos registrados aún.</div>';
+    wrap.appendChild(el('div', 'lempty', 'No hay turnos registrados aún.'));
     return wrap;
   }
 
@@ -2041,6 +2319,12 @@ function buildRoomAdmin(room) {
   ulArea.onclick = () => fileInput.click();
   wrap.appendChild(ulArea);
 
+  // Drive import button
+  const driveBtn = el('button', 'btn-sm btn-sm-blue', '☁ Importar desde Google Drive');
+  driveBtn.style.cssText = 'width:100%;padding:10px;margin-bottom:8px';
+  driveBtn.id = 'drive-import-btn';
+  wrap.appendChild(driveBtn);
+
   const upMsg = el('div', ''); upMsg.id = 'upload-msg'; wrap.appendChild(upMsg);
 
   const div2 = el('div', 'sdiv'); wrap.appendChild(div2);
@@ -2065,6 +2349,57 @@ function buildRoomAdmin(room) {
       const v = $('room-pin-input')?.value.trim();
       await updateDoc(roomDocRef(room.id), { pin: v });
       alert('PIN guardado.');
+    });
+
+    // Drive import button
+    $('drive-import-btn')?.addEventListener('click', async () => {
+      const btn   = $('drive-import-btn');
+      const msgEl = $('upload-msg');
+      const showMsg = (txt, type = 'b') => {
+        if (!msgEl) return;
+        msgEl.className = `ibar ibar-${type}`;
+        msgEl.textContent = txt;
+      };
+      btn.disabled = true;
+      try {
+        showMsg('Abriendo selector de Drive…');
+        const { id, name, mimeType } = await pickDriveFile();
+        showMsg(`Descargando "${name}"…`);
+        const buf = await downloadDriveFile(id, mimeType);
+        showMsg('Procesando…');
+        // Reuse the same merge logic as the manual file upload
+        const wb   = XLSX.read(new Uint8Array(buf), { type: 'array' });
+        const ws   = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+        const tree = {};
+        rows.slice(1).forEach(row => {
+          if (!row[1]) return;
+          const cell = String(row[1]);
+          if (!cell.includes('\n')) return;
+          const parts = cell.split('\n').map(s => s.trim()).filter(Boolean);
+          if (parts.length < 4) return;
+          const sport = parts[3], state2 = parts[2];
+          const cats = parts.slice(4).filter(Boolean);
+          if (!tree[sport]) tree[sport] = {};
+          if (!tree[sport][state2]) tree[sport][state2] = new Set();
+          cats.forEach(c => tree[sport][state2].add(c));
+        });
+        const newAcc = JSON.parse(JSON.stringify(room.access || {}));
+        Object.entries(tree).forEach(([sp, states]) => {
+          if (!newAcc[sp]) newAcc[sp] = { enabled: true, states: {} };
+          Object.entries(states).forEach(([st, cats]) => {
+            if (!newAcc[sp].states[st]) newAcc[sp].states[st] = { enabled: true, cats: {} };
+            cats.forEach(c => { if (!newAcc[sp].states[st].cats[c]) newAcc[sp].states[st].cats[c] = { enabled: true }; });
+          });
+        });
+        await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+        showMsg(`✓ "${name}" importado y fusionado desde Drive.`, 'g');
+      } catch(e) {
+        if (e.message !== 'cancelled') showMsg(`Error: ${e.message}`, 'r');
+        else if (msgEl) msgEl.textContent = '';
+      } finally {
+        btn.disabled = false;
+      }
     });
     fileInput.onchange = async e => {
       const file = e.target.files[0]; if (!file) return;
