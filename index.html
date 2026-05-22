@@ -1379,6 +1379,7 @@ function buildScanner(room, isAdmin) {
     const warn = el('div', 'ibar ibar-a');
     warn.textContent = isAdmin ? 'No hay turno abierto. Abre un turno para comenzar.' : 'Esperando apertura del turno…';
     wrap.appendChild(warn);
+    if (!isAdmin) wrap._scanBlocked = true;
   }
 
   if (state.geo?.lat) {
@@ -1442,6 +1443,15 @@ function buildScanner(room, isAdmin) {
     const toggle = $('scan-toggle');
     const manBtn = $('man-btn');
     const manIn  = $('man-input');
+
+    // Block operators when no shift is open
+    if (wrap._scanBlocked) {
+      if (toggle) { toggle.disabled = true; toggle.style.opacity = '0.4'; }
+      if (manBtn) { manBtn.disabled = true; manBtn.style.opacity = '0.4'; }
+      if (manIn)  { manIn.disabled = true; manIn.style.opacity = '0.4'; }
+      return;
+    }
+
     // Create a persistent canvas that lives outside the camera box
     // so it never gets destroyed when we rebuild the box innerHTML
     const persistCanvas = document.createElement('canvas');
