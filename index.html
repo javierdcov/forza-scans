@@ -2061,14 +2061,18 @@ async function exportRoomToSheet(roomId, statusCallback) {
   await ensureSheetTab(sheetId, tabName, token);
 
   statusCallback?.('Buscando registros nuevos…');
-  // Query scans not yet exported
+  // Fetch all scans and filter in memory — Firestore != operator excludes docs
+  // where the field doesn't exist, which would miss all pre-feature scan docs
   const snap = await db.collection('forza_eventos').doc('current_event')
     .collection('rooms').doc(roomId)
     .collection('scans')
-    .where('exportedToSheet', '!=', true)
     .get();
 
-  const scans = snap.docs.map(d => ({ _id: d.id, ...d.data() })).filter(s => s.type === 'scan');
+  const allDocs = snap.docs.filter(d => {
+    const data = d.data();
+    return data.type === 'scan' && data.exportedToSheet !== true;
+  });
+  const scans = allDocs.map(d => ({ _id: d.id, ...d.data() }));
 
   if (scans.length === 0) {
     statusCallback?.('✓ Sin registros nuevos para exportar.');
@@ -2101,11 +2105,9 @@ async function exportRoomToSheet(roomId, statusCallback) {
   statusCallback?.('Marcando registros como exportados…');
   // Batch-write exportedToSheet: true — Firestore batch max is 500
   const batchSize = 400;
-  for (let i = 0; i < snap.docs.length; i += batchSize) {
+  for (let i = 0; i < allDocs.length; i += batchSize) {
     const batch = db.batch();
-    snap.docs.slice(i, i + batchSize).forEach(d => {
-      if (d.data().type === 'scan') batch.update(d.ref, { exportedToSheet: true });
-    });
+    allDocs.slice(i, i + batchSize).forEach(d => batch.update(d.ref, { exportedToSheet: true }));
     await batch.commit();
   }
 
