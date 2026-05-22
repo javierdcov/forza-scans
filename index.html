@@ -2072,7 +2072,12 @@ async function exportRoomToSheet(roomId, statusCallback) {
     const data = d.data();
     return data.type === 'scan' && data.exportedToSheet !== true;
   });
-  const scans = allDocs.map(d => ({ _id: d.id, ...d.data() }));
+  const scans = allDocs.map(d => ({ _id: d.id, ...d.data() }))
+    .sort((a, b) => {
+      const dateA = `${a.day || ''} ${a.time || ''}`;
+      const dateB = `${b.day || ''} ${b.time || ''}`;
+      return dateA.localeCompare(dateB);
+    });
 
   if (scans.length === 0) {
     statusCallback?.('✓ Sin registros nuevos para exportar.');
