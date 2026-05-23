@@ -447,6 +447,11 @@ auth.onAuthStateChanged(async user => {
     const profileSnap = await db.collection('forza_users').doc(user.uid).get();
     if (profileSnap.exists) {
       state.profile = profileSnap.data() || null;
+      if (state.profile?.disabled === true) {
+        await auth.signOut();
+        renderLogin('Tu cuenta ha sido desactivada. Contacta al administrador.');
+        return;
+      }
       startApp();
     } else {
       // First login — create profile (master admin path)
@@ -787,6 +792,22 @@ function rerender() {
 
   if (!state.authUser) { renderLogin(); return; }
   if (!state.profile)  { return; }
+
+  // Global app lock — block all non-master_admin users when appEnabled === false
+  if (state.event?.appEnabled === false && state.profile.role !== 'master_admin') {
+    root.innerHTML = '';
+    const locked = el('div', 'startup');
+    locked.innerHTML = `
+      <div class="startup-brand">Forza Scans</div>
+      <div class="startup-title">Aplicación desactivada</div>
+      <div class="startup-sub">El sistema está temporalmente fuera de servicio.<br>Contacta al administrador.</div>
+      <button class="startup-go" style="margin-top:16px;max-width:320px" id="lock-signout">Cerrar sesión</button>`;
+    root.appendChild(locked);
+    setTimeout(() => {
+      $('lock-signout')?.addEventListener('click', () => auth.signOut());
+    }, 0);
+    return;
+  }
 
   // Don't rebuild the page while a scan result is on screen
   if (scanCooldown && state.view === 'scanner') return;
@@ -1943,12 +1964,13 @@ async function refreshOperatorList(container) {
     container.innerHTML = '';
     operators.forEach(op => {
       const assignedRoom = state.rooms.find(r => r.id === op.assignedRoom);
+      const isDisabled = op.disabled === true;
       const li = el('div', 'li tappable');
       li.innerHTML = `
-        <div class="ld" style="background:var(--amber)"></div>
+        <div class="ld" style="background:${isDisabled ? 'var(--red-border)' : 'var(--amber)'}"></div>
         <div style="flex:1;min-width:0">
-          <div class="ln">${op.name || op.email}</div>
-          <div class="lm">${op.email}</div>
+          <div class="ln" style="${isDisabled ? 'color:var(--text3);text-decoration:line-through' : ''}">${op.name || op.email}</div>
+          <div class="lm">${op.email}${isDisabled ? ' · <span style="color:var(--red-text);font-weight:700">Desactivado</span>' : ''}</div>
         </div>
         <div class="ltime" style="text-align:right">
           <div style="font-size:11px;color:var(--text2)">${assignedRoom ? assignedRoom.name : 'Sin comedor'}</div>
@@ -1968,20 +1990,22 @@ function showOperatorModal(op, listContainer) {
   const roomOptions  = state.rooms.map(r =>
     `<option value="${r.id}" ${r.id === op.assignedRoom ? 'selected' : ''}>${r.name}</option>`
   ).join('');
+  const isDisabled = op.disabled === true;
 
   showModal(`
     <div class="modal-title">${op.name || op.email}</div>
-    <div class="modal-sub">${op.email}<br>Comedor actual: <strong>${assignedRoom ? assignedRoom.name : 'Sin asignar'}</strong></div>
+    <div class="modal-sub">${op.email}<br>Comedor actual: <strong>${assignedRoom ? assignedRoom.name : 'Sin asignar'}</strong><br>Estado: <strong style="color:${isDisabled ? 'var(--red-text)' : 'var(--green-text)'}">${isDisabled ? 'Desactivado' : 'Activo'}</strong></div>
     <label class="form-label">Asignar comedor</label>
     <select id="op-room-select" style="width:100%;padding:8px 10px;border:0.5px solid var(--border2);border-radius:var(--r);font-size:13px;margin-bottom:18px;background:var(--surface);color:var(--text)">
       <option value="">— Sin comedor —</option>
       ${roomOptions}
     </select>
-    <div style="display:flex;gap:8px;margin-bottom:0">
+    <div style="display:flex;gap:8px;margin-bottom:10px">
       <button class="btn-sm btn-sm-ghost" data-action="cancel" style="flex:1;padding:9px">Cancelar</button>
       <button class="btn-sm btn-sm-blue" data-action="save-room" style="flex:1;padding:9px">Guardar</button>
     </div>
-    <div style="height:0.5px;background:var(--border);margin:14px 0"></div>
+    <div style="height:0.5px;background:var(--border);margin:4px 0 12px"></div>
+    <button class="btn-sm ${isDisabled ? 'btn-sm-green' : 'btn-sm-amber'}" data-action="toggle-disabled" style="width:100%;padding:9px;margin-bottom:8px">${isDisabled ? '✓ Activar operador' : '⏸ Desactivar operador'}</button>
     <button class="btn-sm btn-sm-ghost" data-action="delete-op" style="width:100%;padding:9px;color:var(--red-text);border-color:var(--red-border)">🗑 Eliminar operador</button>`,
     {
       'cancel': () => closeModal(),
@@ -1994,6 +2018,16 @@ function showOperatorModal(op, listContainer) {
           await refreshOperatorList(listContainer);
         } catch (e) {
           alert('Error al guardar: ' + e.message);
+        }
+      },
+
+      'toggle-disabled': async () => {
+        closeModal();
+        try {
+          await updateDoc(userDocRef(op.uid), { disabled: !isDisabled });
+          await refreshOperatorList(listContainer);
+        } catch (e) {
+          alert('Error al actualizar: ' + e.message);
         }
       },
 
@@ -2696,6 +2730,25 @@ function buildGlobalAdmin() {
   evRow.innerHTML = `<input class="minput" id="event-name-input" value="${state.event?.name || ''}"/><button class="mbtn" id="save-event-name">Guardar</button>`;
   wrap.appendChild(evRow);
 
+  // App lock toggle
+  const appEnabled = state.event?.appEnabled !== false; // default true if field absent
+  const lockDiv = el('div', 'sdiv'); wrap.appendChild(lockDiv);
+  const lockLabel = el('div', 'sl', 'ACCESO A LA APLICACIÓN');
+  wrap.appendChild(lockLabel);
+  const lockCard = el('div', 'room-mgmt-card');
+  const lockRow = el('div', 'room-mgmt-row');
+  lockRow.innerHTML = `
+    <div style="flex:1">
+      <div style="font-size:13px;font-weight:700">${appEnabled ? '🟢 Aplicación activa' : '🔴 Aplicación desactivada'}</div>
+      <div style="font-size:11px;color:var(--text2);margin-top:2px">${appEnabled ? 'Operadores y admins pueden acceder.' : 'Solo el administrador maestro puede entrar.'}</div>
+    </div>`;
+  const lockToggle = buildToggle(appEnabled, async val => {
+    await db.collection('forza_eventos').doc('current_event').set({ appEnabled: val }, { merge: true });
+  });
+  lockRow.appendChild(lockToggle);
+  lockCard.appendChild(lockRow);
+  wrap.appendChild(lockCard);
+
   // Stats
   const totalPresent = state.rooms.reduce((s, r) => s + (r.presentToday || 0), 0);
   const stats = el('div', 'stats-row');
@@ -2875,13 +2928,14 @@ function buildPinGate(onSuccess) {
 }
 
 // ── Login screen ──────────────────────────────────────────────
-function renderLogin() {
+function renderLogin(errorMsg) {
   const root = $('root');
   if (!root) return;
   root.innerHTML = `
     <div class="startup">
       <div class="startup-brand">Forza Scans</div>
       <div class="startup-title">Bienvenido</div>
+      ${errorMsg ? `<div class="ibar ibar-r" style="width:100%;max-width:320px;margin-bottom:10px">${errorMsg}</div>` : ''}
 
       <div id="login-admin-block" class="login-form">
         <div class="startup-sub" style="margin-bottom:16px">Acceso de administrador</div>
