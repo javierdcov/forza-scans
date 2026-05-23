@@ -402,6 +402,7 @@ let state = {
   unsubscribers: [],
   googleToken:  null,   // OAuth access token for Google APIs
   googleTokenExpiry: 0, // timestamp when token expires
+  shiftsReady:  false,  // true after first shifts snapshot returns — prevents false block on page reload
 };
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -511,10 +512,12 @@ function startListeners(roomId) {
 
   // Shifts for active room — uses shiftsDate (may be a past date when browsing)
   const shiftsDay = state.shiftsDate || today();
+  state.shiftsReady = false; // reset — listener not yet returned data
   const u4 = roomBase.collection('shifts')
     .where('day', '==', shiftsDay)
     .onSnapshot(snap => {
       state.shifts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      state.shiftsReady = true; // data received — safe to evaluate open shift
       rerender();
     });
 
@@ -1389,7 +1392,12 @@ function buildScanner(room, isAdmin) {
   const wrap = el('div', '');
   const openShift = getOpenShift();
 
-  if (!openShift) {
+  if (!state.shiftsReady) {
+    // Shifts listener hasn't returned yet — show neutral loading, never block
+    const loading = el('div', 'ibar ibar-b');
+    loading.textContent = 'Verificando turno…';
+    wrap.appendChild(loading);
+  } else if (!openShift) {
     const warn = el('div', 'ibar ibar-a');
     warn.textContent = isAdmin ? 'No hay turno abierto. Abre un turno para comenzar.' : 'Esperando apertura del turno…';
     wrap.appendChild(warn);
