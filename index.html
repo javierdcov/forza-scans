@@ -1410,12 +1410,15 @@ function buildScanner(room, isAdmin) {
     wrap.appendChild(geoEl);
   }
 
-  // Stats
-  const todayScans = state.scans.filter(s => s.type === 'scan');
+  // Stats — scoped to current open shift, falls back to today if no shift open
+  const shiftScans = openShift
+    ? state.scans.filter(s => s.type === 'scan' && s.shiftId === openShift.id)
+    : state.scans.filter(s => s.type === 'scan');
+  const statsLabel = openShift ? `Turno: ${openShift.name || openShift.emoji || ''}` : 'Hoy';
   const stats = el('div', 'stats-row');
   stats.innerHTML = `
-    <div class="stat-card"><div class="stat-num" style="color:var(--green-text)">${todayScans.filter(s=>s.result?.result==='granted'||s.result?.result==='auto-added').length}</div><div class="stat-label">Presentes hoy</div></div>
-    <div class="stat-card"><div class="stat-num" style="color:var(--red-text)">${todayScans.filter(s=>s.result?.result==='denied').length}</div><div class="stat-label">Denegados</div></div>`;
+    <div class="stat-card"><div class="stat-num" style="color:var(--green-text)">${shiftScans.filter(s=>s.result?.result==='granted'||s.result?.result==='auto-added').length}</div><div class="stat-label">Presentes — ${statsLabel}</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:var(--red-text)">${shiftScans.filter(s=>s.result?.result==='denied').length}</div><div class="stat-label">Denegados — ${statsLabel}</div></div>`;
   wrap.appendChild(stats);
 
   // Camera box
