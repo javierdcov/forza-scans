@@ -766,7 +766,8 @@ ${noShows.length > 0 ? `<div class="sec">No se presentaron — cuentan para el g
 }
 
 // ── Render engine (lightweight, no framework) ─────────────────
-let scanCooldown = false;
+let scanCooldown  = false;
+let cameraActive  = false;
 
 function rerender() {
   // Ensure activeRoomId is valid once rooms load
@@ -784,6 +785,10 @@ function rerender() {
 
   // Don't rebuild the page while a scan result is on screen
   if (scanCooldown && state.view === 'scanner') return;
+
+  // Don't destroy the camera while operator is actively scanning —
+  // just update the scan log in place instead
+  if (cameraActive && state.view === 'scanner') { refreshLog(); return; }
 
   // Check auto-close on every state update (catches timer gaps from background/suspend)
   // Only run when viewing today — state.shifts holds today's data only when shiftsDate is null
@@ -1524,6 +1529,7 @@ function buildScanner(room, isAdmin) {
             box.appendChild(debugBar);
 
             await vid.play();
+            cameraActive = true;
             toggle.dataset.scanning = 'true';
             toggle.textContent = 'Detener escáner';
             toggle.className = 'btn btn-ghost';
@@ -1630,6 +1636,7 @@ function tickScan(video, canvas) {
 function stopCamera() {
   if (rafId) { clearInterval(rafId); rafId = null; }
   if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
+  cameraActive = false;
 }
 
 async function handleScan(raw) {
