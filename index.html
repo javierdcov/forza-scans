@@ -1990,7 +1990,8 @@ function showOperatorModal(op, listContainer) {
   const roomOptions  = state.rooms.map(r =>
     `<option value="${r.id}" ${r.id === op.assignedRoom ? 'selected' : ''}>${r.name}</option>`
   ).join('');
-  const isDisabled = op.disabled === true;
+  const isDisabled    = op.disabled === true;
+  const isMasterAdmin = state.profile?.role === 'master_admin';
 
   showModal(`
     <div class="modal-title">${op.name || op.email}</div>
@@ -2004,9 +2005,11 @@ function showOperatorModal(op, listContainer) {
       <button class="btn-sm btn-sm-ghost" data-action="cancel" style="flex:1;padding:9px">Cancelar</button>
       <button class="btn-sm btn-sm-blue" data-action="save-room" style="flex:1;padding:9px">Guardar</button>
     </div>
+    ${isMasterAdmin ? `
     <div style="height:0.5px;background:var(--border);margin:4px 0 12px"></div>
     <button class="btn-sm ${isDisabled ? 'btn-sm-green' : 'btn-sm-amber'}" data-action="toggle-disabled" style="width:100%;padding:9px;margin-bottom:8px">${isDisabled ? '✓ Activar operador' : '⏸ Desactivar operador'}</button>
-    <button class="btn-sm btn-sm-ghost" data-action="delete-op" style="width:100%;padding:9px;color:var(--red-text);border-color:var(--red-border)">🗑 Eliminar operador</button>`,
+    <button class="btn-sm btn-sm-ghost" data-action="delete-op" style="width:100%;padding:9px;color:var(--red-text);border-color:var(--red-border)">🗑 Eliminar operador</button>
+    ` : ''}`,
     {
       'cancel': () => closeModal(),
 
@@ -2723,6 +2726,8 @@ function buildGlobalAdmin() {
   const wrap = el('div', '');
   if (!state.adminUnlocked) { wrap.appendChild(buildPinGate(() => { state.adminUnlocked = true; rerender(); })); return wrap; }
 
+  const isMasterAdmin = state.profile?.role === 'master_admin';
+
   // Event name
   const evLabel = el('div', 'sl', 'NOMBRE DEL EVENTO');
   wrap.appendChild(evLabel);
@@ -2730,27 +2735,30 @@ function buildGlobalAdmin() {
   evRow.innerHTML = `<input class="minput" id="event-name-input" value="${state.event?.name || ''}"/><button class="mbtn" id="save-event-name">Guardar</button>`;
   wrap.appendChild(evRow);
 
-  // App lock toggle
-  const appEnabled = state.event?.appEnabled !== false; // default true if field absent
-  const lockDiv = el('div', 'sdiv'); wrap.appendChild(lockDiv);
-  const lockLabel = el('div', 'sl', 'ACCESO A LA APLICACIÓN');
-  wrap.appendChild(lockLabel);
-  const lockCard = el('div', 'room-mgmt-card');
-  const lockRow = el('div', 'room-mgmt-row');
-  lockRow.innerHTML = `
-    <div style="flex:1">
-      <div style="font-size:13px;font-weight:700">${appEnabled ? '🟢 Aplicación activa' : '🔴 Aplicación desactivada'}</div>
-      <div style="font-size:11px;color:var(--text2);margin-top:2px">${appEnabled ? 'Operadores y admins pueden acceder.' : 'Solo el administrador maestro puede entrar.'}</div>
-    </div>`;
-  const lockToggle = buildToggle(appEnabled, async val => {
-    await db.collection('forza_eventos').doc('current_event').set({ appEnabled: val }, { merge: true });
-  });
-  lockRow.appendChild(lockToggle);
-  lockCard.appendChild(lockRow);
-  wrap.appendChild(lockCard);
+  // App lock toggle — master admin only
+  if (isMasterAdmin) {
+    const appEnabled = state.event?.appEnabled !== false;
+    const lockDiv = el('div', 'sdiv'); wrap.appendChild(lockDiv);
+    const lockLabel = el('div', 'sl', 'ACCESO A LA APLICACIÓN');
+    wrap.appendChild(lockLabel);
+    const lockCard = el('div', 'room-mgmt-card');
+    const lockRow = el('div', 'room-mgmt-row');
+    lockRow.innerHTML = `
+      <div style="flex:1">
+        <div style="font-size:13px;font-weight:700">${appEnabled ? '🟢 Aplicación activa' : '🔴 Aplicación desactivada'}</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:2px">${appEnabled ? 'Operadores y admins pueden acceder.' : 'Solo el administrador maestro puede entrar.'}</div>
+      </div>`;
+    const lockToggle = buildToggle(appEnabled, async val => {
+      await db.collection('forza_eventos').doc('current_event').set({ appEnabled: val }, { merge: true });
+    });
+    lockRow.appendChild(lockToggle);
+    lockCard.appendChild(lockRow);
+    wrap.appendChild(lockCard);
+  }
 
   // Stats
   const totalPresent = state.rooms.reduce((s, r) => s + (r.presentToday || 0), 0);
+  const statsDiv = el('div', 'sdiv'); wrap.appendChild(statsDiv);
   const stats = el('div', 'stats-row');
   stats.innerHTML = `
     <div class="stat-card"><div class="stat-num">${state.rooms.length}</div><div class="stat-label">Comedores</div></div>
@@ -2765,10 +2773,11 @@ function buildGlobalAdmin() {
   const rmCard = el('div', 'room-mgmt-card');
   state.rooms.forEach(r => {
     const row = el('div', 'room-mgmt-row');
+    // Delete button only for master admin
     row.innerHTML = `
       <span style="flex:1;font-size:13px;font-weight:600">${r.name}</span>
       <button class="btn-sm btn-sm-blue" onclick="exportForzaCSV('${r.id}')">CSV</button>
-      <button class="del-btn" onclick="deleteRoom('${r.id}')">✕</button>`;
+      ${isMasterAdmin ? `<button class="del-btn" onclick="deleteRoom('${r.id}')">✕</button>` : ''}`;
     rmCard.appendChild(row);
   });
   wrap.appendChild(rmCard);
@@ -2777,37 +2786,39 @@ function buildGlobalAdmin() {
 
   const div2 = el('div', 'sdiv'); wrap.appendChild(div2);
 
-  // Admin accounts management
-  const admLabel = el('div', 'sl', 'CUENTAS DE ADMINISTRADOR');
-  wrap.appendChild(admLabel);
-  const admNote = el('div', 'ibar ibar-b', 'Como administrador maestro puedes crear y eliminar cuentas de otros administradores.');
-  wrap.appendChild(admNote);
+  // Admin accounts management — master admin only
+  if (isMasterAdmin) {
+    const admLabel = el('div', 'sl', 'CUENTAS DE ADMINISTRADOR');
+    wrap.appendChild(admLabel);
+    const admNote = el('div', 'ibar ibar-b', 'Como administrador maestro puedes crear y eliminar cuentas de otros administradores.');
+    wrap.appendChild(admNote);
 
-  const addAdminBlock = el('div', 'add-admin-block');
-  addAdminBlock.innerHTML = `
-    <input class="minput" id="new-admin-email" type="email" placeholder="Email del nuevo admin" style="width:100%;margin-bottom:6px"/>
-    <div class="mrow">
-      <input class="minput" id="new-admin-pass" type="password" placeholder="Contraseña temporal"/>
-      <input class="minput" id="new-admin-name" placeholder="Nombre"/>
-    </div>
-    <button class="btn-sm btn-sm-blue" id="create-admin-btn" style="width:100%;padding:9px;margin-bottom:6px">Crear cuenta de admin</button>
-    <div id="admin-msg"></div>`;
-  wrap.appendChild(addAdminBlock);
+    const addAdminBlock = el('div', 'add-admin-block');
+    addAdminBlock.innerHTML = `
+      <input class="minput" id="new-admin-email" type="email" placeholder="Email del nuevo admin" style="width:100%;margin-bottom:6px"/>
+      <div class="mrow">
+        <input class="minput" id="new-admin-pass" type="password" placeholder="Contraseña temporal"/>
+        <input class="minput" id="new-admin-name" placeholder="Nombre"/>
+      </div>
+      <button class="btn-sm btn-sm-blue" id="create-admin-btn" style="width:100%;padding:9px;margin-bottom:6px">Crear cuenta de admin</button>
+      <div id="admin-msg"></div>`;
+    wrap.appendChild(addAdminBlock);
 
-  // List existing admins
-  const adminListWrap = el('div', ''); adminListWrap.id = 'admin-list'; wrap.appendChild(adminListWrap);
-  loadAdminList(adminListWrap);
+    // List existing admins
+    const adminListWrap = el('div', ''); adminListWrap.id = 'admin-list'; wrap.appendChild(adminListWrap);
+    loadAdminList(adminListWrap);
+  }
 
   const div3 = el('div', 'sdiv'); wrap.appendChild(div3);
 
-  // New event
+  // Export + new event
   const evtBox = el('div', 'export-box');
   evtBox.innerHTML = `
-    <div style="font-size:13px;font-weight:700;margin-bottom:3px">Exportar y nuevo evento</div>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Descarga todos los registros y limpia la configuración.</div>
+    <div style="font-size:13px;font-weight:700;margin-bottom:3px">Exportar${isMasterAdmin ? ' y nuevo evento' : ''}</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Descarga todos los registros${isMasterAdmin ? ' y limpia la configuración.' : '.'}</div>
     <div style="display:flex;gap:8px">
       <button class="btn-sm btn-sm-green" style="flex:1;padding:9px" onclick="exportAllCSV()">Exportar todos (CSV)</button>
-      <button class="btn-sm btn-sm-red" style="flex:1;padding:9px" onclick="newEvent()">Nuevo evento</button>
+      ${isMasterAdmin ? `<button class="btn-sm btn-sm-red" style="flex:1;padding:9px" onclick="newEvent()">Nuevo evento</button>` : ''}
     </div>`;
   wrap.appendChild(evtBox);
 
