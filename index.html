@@ -771,6 +771,8 @@ ${noShows.length > 0 ? `<div class="sec">No se presentaron — cuentan para el g
 // ── Render engine (lightweight, no framework) ─────────────────
 let scanCooldown  = false;
 let cameraActive  = false;
+// Cache for past shift scan counts — keyed by shiftId, avoids re-querying on nav
+const pastShiftStatsCache = {};
 
 function rerender() {
   // Ensure activeRoomId is valid once rooms load
@@ -1024,35 +1026,106 @@ function buildShiftsTab(room) {
   }
   wrap.appendChild(pills);
 
-  // Today's shift summary
-  if (todayShifts.length > 0) {
+  // Shift summary cards
+  if (todayShifts.length > 0 || !isToday) {
     const divider = el('div', 'sdiv'); wrap.appendChild(divider);
     const sumLabel = el('div', 'sl', 'RESUMEN');
     wrap.appendChild(sumLabel);
 
-    todayShifts.sort((a, b) => (a.shiftKey || '').localeCompare(b.shiftKey || '')).forEach(sh => {
-      const shiftScans = state.scans.filter(s => s.shiftId === sh.id);
-      const present = shiftScans.filter(s => s.type === 'scan' && (s.result?.result === 'granted' || s.result?.result === 'auto-added')).length;
-      const card = el('div', 'shift-record');
-      card.innerHTML = `
-        <div class="shift-record-header">
-          <div class="shift-record-title">${sh.emoji} ${sh.name}
-            <span class="badge ${sh.status==='open'?'badge-green':sh.status==='closed'?'badge-blue':'badge-amber'}">
-              ${sh.status==='open'?'Abierto':sh.status==='closed'?'Cerrado':'Pendiente'}
-            </span>
+    if (isToday) {
+      // Today — counts from state.scans (already in memory, instant)
+      todayShifts.sort((a, b) => (a.shiftKey || '').localeCompare(b.shiftKey || '')).forEach(sh => {
+        const shiftScans = state.scans.filter(s => s.shiftId === sh.id && s.type === 'scan');
+        const present  = shiftScans.filter(s => s.result?.result === 'granted' || s.result?.result === 'auto-added').length;
+        const denied   = shiftScans.filter(s => s.result?.result === 'denied').length;
+        const total    = shiftScans.length;
+        const card = el('div', 'shift-record');
+        card.innerHTML = `
+          <div class="shift-record-header">
+            <div class="shift-record-title">${sh.emoji} ${sh.name}
+              <span class="badge ${sh.status==='open'?'badge-green':sh.status==='closed'?'badge-blue':'badge-amber'}">
+                ${sh.status==='open'?'Abierto':sh.status==='closed'?'Cerrado':'Pendiente'}
+              </span>
+            </div>
+            <div class="shift-record-meta">${sh.start}–${sh.end}${sh.openedAt ? ' · Abierto '+sh.openedAt : ''}${sh.closedAt ? ' · Cerrado '+sh.closedAt : ''}${sh.autoClosedReason ? ' · '+sh.autoClosedReason : ''}</div>
           </div>
-          <div class="shift-record-meta">${sh.start}–${sh.end}${sh.openedAt ? ' · Abierto '+sh.openedAt : ''}${sh.closedAt ? ' · Cerrado '+sh.closedAt : ''}${sh.autoClosedReason ? ' · '+sh.autoClosedReason : ''}</div>
-        </div>
-        <div class="stats-row-3">
-          <div class="shift-stat"><div class="shift-stat-num" style="color:var(--green-text)">${present}</div><div class="shift-stat-label">Presentes</div></div>
-          <div class="shift-stat"><div class="shift-stat-num">${sh.expectedCount || 0}</div><div class="shift-stat-label">Garantizado</div></div>
-          <div class="shift-stat"><div class="shift-stat-num">${sh.scanCount || 0}</div><div class="shift-stat-label">Total scans</div></div>
-        </div>`;
-      wrap.appendChild(card);
-    });
-  } else if (!isToday) {
-    const empty = el('div', 'lempty', 'Sin turnos registrados para este día.');
-    wrap.appendChild(empty);
+          <div class="stats-row-3">
+            <div class="shift-stat"><div class="shift-stat-num" style="color:var(--green-text)">${present}</div><div class="shift-stat-label">Presentes</div></div>
+            <div class="shift-stat"><div class="shift-stat-num" style="color:var(--red-text)">${denied}</div><div class="shift-stat-label">Denegados</div></div>
+            <div class="shift-stat"><div class="shift-stat-num">${total}</div><div class="shift-stat-label">Total scans</div></div>
+          </div>`;
+        wrap.appendChild(card);
+      });
+    } else {
+      // Past date — query Firestore on tap, cache results by shiftId
+      if (todayShifts.length === 0) {
+        wrap.appendChild(el('div', 'lempty', 'Sin turnos registrados para este día.'));
+      } else {
+        todayShifts.sort((a, b) => (a.shiftKey || '').localeCompare(b.shiftKey || '')).forEach(sh => {
+          const card = el('div', 'shift-record');
+          const cached = pastShiftStatsCache[sh.id];
+
+          const renderCardContent = (stats) => {
+            const present = stats ? stats.present : null;
+            const denied  = stats ? stats.denied  : null;
+            const total   = stats ? stats.total   : null;
+            card.innerHTML = `
+              <div class="shift-record-header">
+                <div class="shift-record-title">${sh.emoji} ${sh.name}
+                  <span class="badge ${sh.status==='open'?'badge-green':sh.status==='closed'?'badge-blue':'badge-amber'}">
+                    ${sh.status==='open'?'Abierto':sh.status==='closed'?'Cerrado':'Pendiente'}
+                  </span>
+                </div>
+                <div class="shift-record-meta">${sh.start}–${sh.end}${sh.openedAt ? ' · Abierto '+sh.openedAt : ''}${sh.closedAt ? ' · Cerrado '+sh.closedAt : ''}${sh.autoClosedReason ? ' · '+sh.autoClosedReason : ''}</div>
+              </div>
+              ${stats ? `
+              <div class="stats-row-3">
+                <div class="shift-stat"><div class="shift-stat-num" style="color:var(--green-text)">${present}</div><div class="shift-stat-label">Presentes</div></div>
+                <div class="shift-stat"><div class="shift-stat-num" style="color:var(--red-text)">${denied}</div><div class="shift-stat-label">Denegados</div></div>
+                <div class="shift-stat"><div class="shift-stat-num">${total}</div><div class="shift-stat-label">Total scans</div></div>
+              </div>` : `
+              <button class="btn-sm btn-sm-blue" style="width:100%;padding:8px;margin-top:6px" data-load-shift="${sh.id}">
+                Ver estadísticas
+              </button>`}`;
+          };
+
+          renderCardContent(cached || null);
+
+          if (!cached) {
+            // Wire tap-to-load after render
+            setTimeout(() => {
+              const btn = card.querySelector(`[data-load-shift="${sh.id}"]`);
+              if (!btn) return;
+              btn.onclick = async () => {
+                btn.disabled = true;
+                btn.textContent = 'Cargando…';
+                try {
+                  const snap = await db.collection('forza_eventos').doc('current_event')
+                    .collection('rooms').doc(state.activeRoomId)
+                    .collection('scans')
+                    .where('shiftId', '==', sh.id)
+                    .where('type', '==', 'scan')
+                    .get();
+                  const docs = snap.docs.map(d => d.data());
+                  const stats = {
+                    present: docs.filter(s => s.result?.result === 'granted' || s.result?.result === 'auto-added').length,
+                    denied:  docs.filter(s => s.result?.result === 'denied').length,
+                    total:   docs.length,
+                  };
+                  pastShiftStatsCache[sh.id] = stats;
+                  renderCardContent(stats);
+                } catch(e) {
+                  btn.disabled = false;
+                  btn.textContent = 'Error — reintentar';
+                }
+              };
+            }, 0);
+          }
+
+          wrap.appendChild(card);
+        });
+      }
+    }
   }
 
   // Wire day selector after DOM is ready
