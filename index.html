@@ -1593,6 +1593,10 @@ function tickScan(video, canvas) {
     '| video readyState:', video?.readyState,
     '| dimensions:', video?.videoWidth, 'x', video?.videoHeight);
 
+  // Fixed crop canvas — reused every frame to avoid GC pressure on mid-range devices
+  const cropCanvas = document.createElement('canvas');
+  const cropCtx    = cropCanvas.getContext('2d', { willReadFrequently: true });
+
   rafId = setInterval(() => {
     const liveVideo = document.getElementById('qr-video-live') || video;
     if (!liveVideo || liveVideo.readyState < 2 || liveVideo.videoWidth === 0 || liveVideo.paused) return;
@@ -1600,12 +1604,28 @@ function tickScan(video, canvas) {
     try {
       const vw = liveVideo.videoWidth;
       const vh = liveVideo.videoHeight;
-      canvas.width = vw; canvas.height = vh;
-      ctx.drawImage(liveVideo, 0, 0, vw, vh);
-      const imageData = ctx.getImageData(0, 0, vw, vh);
+
+      // Crop center 60% of the frame — eliminates background noise, reduces pixels ZXing processes
+      const cropW = Math.floor(vw * 0.6);
+      const cropH = Math.floor(vh * 0.6);
+      const cropX = Math.floor((vw - cropW) / 2);
+      const cropY = Math.floor((vh - cropH) / 2);
+
+      if (cropCanvas.width !== cropW || cropCanvas.height !== cropH) {
+        cropCanvas.width  = cropW;
+        cropCanvas.height = cropH;
+      }
+      cropCtx.drawImage(liveVideo, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+      // Also draw full frame to main canvas (used by ZXing luminance source)
+      canvas.width = cropW; canvas.height = cropH;
+      const mainCtx = canvas.getContext('2d', { willReadFrequently: true });
+      mainCtx.drawImage(liveVideo, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+      const imageData = cropCtx.getImageData(0, 0, cropW, cropH);
 
       if (reader) {
-        // ZXing path — uses HTMLCanvasElementLuminanceSource (native canvas support)
+        // ZXing path — uses HTMLCanvasElementLuminanceSource on the cropped canvas
         try {
           const luminance = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
           const binarized = new ZXing.HybridBinarizer(luminance);
@@ -1635,7 +1655,7 @@ function tickScan(video, canvas) {
     } catch (e) {
       console.warn('[QR] Frame error:', e.message);
     }
-  }, 200);
+  }, 80); // 80ms ≈ 12fps — more than double the previous 5fps attempt rate
 }
 
 function stopCamera() {
