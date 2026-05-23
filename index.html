@@ -1480,8 +1480,8 @@ function buildScanner(room, isAdmin) {
           const constraints = {
             video: {
               facingMode: { ideal: 'environment' },
-              width:  { ideal: 640 },
-              height: { ideal: 480 },
+              width:  { ideal: 960 },
+              height: { ideal: 720 },
             }
           };
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -1501,15 +1501,19 @@ function buildScanner(room, isAdmin) {
             vid.style.cssText = 'width:100%;display:block';
             vid.srcObject = stream;
             box.appendChild(vid);
-            // Enable continuous autofocus if supported
+            // Enable continuous autofocus, near focus, and 1.5x zoom if supported
             try {
               const track = stream.getVideoTracks()[0];
               const caps = track.getCapabilities ? track.getCapabilities() : {};
-              if (caps.focusMode && caps.focusMode.includes('continuous')) {
-                await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
-                console.log('[CAM] Continuous autofocus enabled');
+              const advanced = [];
+              if (caps.focusMode?.includes('continuous')) advanced.push({ focusMode: 'continuous' });
+              if (caps.focusDistance) advanced.push({ focusDistance: caps.focusDistance.min ?? 0.1 });
+              if (caps.zoom && caps.zoom.max >= 1.5) advanced.push({ zoom: 1.5 });
+              if (advanced.length) {
+                await track.applyConstraints({ advanced });
+                console.log('[CAM] Applied constraints:', JSON.stringify(advanced));
               }
-            } catch(e) { /* autofocus not supported */ }
+            } catch(e) { console.warn('[CAM] Constraint apply failed:', e.message); }
             const overlay = document.createElement('div');
             overlay.className = 'scan-overlay';
             overlay.innerHTML = '<div class="scan-frame"><div class="scan-line"></div></div>';
@@ -1571,9 +1575,10 @@ function getZXingReader() {
     if (typeof ZXing !== 'undefined') {
       const hints = new Map();
       hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      hints.set(ZXing.DecodeHintType.PURE_BARCODE, true); // skip preprocessing, treat frame as clean barcode
       _zxingReader = new ZXing.MultiFormatReader();
       _zxingReader.setHints(hints);
-      console.log('[QR] ZXing reader initialized');
+      console.log('[QR] ZXing reader initialized with TRY_HARDER + PURE_BARCODE');
     }
   } catch(e) { console.warn('[QR] ZXing init failed:', e.message); }
   return _zxingReader;
