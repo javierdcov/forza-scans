@@ -3417,30 +3417,34 @@ function renderLogin(errorMsg) {
       if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Completa todos los campos, incluyendo el código de invitación.'; }
       return;
     }
-    // Validate invite code — single-field query, validate status client-side
-    let matchedEventId = null;
+
+    let cred = null;
     try {
+      state._enrolling = true;
+      cred = await auth.createUserWithEmailAndPassword(email, OPERATOR_PASSWORD);
+
+      // Now authenticated — query is allowed by Firestore rules
       const evSnap = await db.collection('forza_eventos')
         .where('inviteCode', '==', code)
         .get();
+
       if (evSnap.empty) {
+        await cred.user.delete(); // clean up orphan auth account
+        state._enrolling = false;
         if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Código de invitación inválido.'; }
         return;
       }
+
       const evDoc  = evSnap.docs[0];
       const status = evDoc.data().status || 'active';
       if (status === 'ended' || status === 'readonly') {
+        await cred.user.delete();
+        state._enrolling = false;
         if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Este evento ya no está activo. Contacta al administrador.'; }
         return;
       }
-      matchedEventId = evDoc.id;
-    } catch(e) {
-      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Error al verificar código: ' + e.message; }
-      return;
-    }
-    try {
-      state._enrolling = true; // block onAuthStateChanged from showing first-setup
-      const cred = await auth.createUserWithEmailAndPassword(email, OPERATOR_PASSWORD);
+
+      const matchedEventId = evDoc.id;
       await db.collection('forza_users').doc(cred.user.uid).set({
         email,
         name:          `${first} ${last}`,
@@ -3452,15 +3456,20 @@ function renderLogin(errorMsg) {
         inviteCode:    code,
         createdAt:     firebase.firestore.FieldValue.serverTimestamp(),
       });
+
       state._enrolling = false;
-      // Profile is now written — set it locally and start the app
       state.profile = {
         email, name: `${first} ${last}`, role: 'operator',
         assignedEvent: matchedEventId, assignedRoom: null,
       };
       startApp();
+
     } catch (e) {
       state._enrolling = false;
+      // If auth account was created but something after failed, clean it up
+      if (cred?.user) {
+        try { await cred.user.delete(); } catch(_) {}
+      }
       if (errEl) {
         errEl.style.display = 'block';
         errEl.textContent = e.code === 'auth/email-already-in-use'
