@@ -473,12 +473,26 @@ auth.onAuthStateChanged(async user => {
       }
       startApp();
     } else {
-      renderFirstSetup();
+      // If enrollment is in progress, doEnroll will call startApp() after writing
+      // the profile — do nothing here to avoid the race condition.
+      if (state._enrolling) return;
+      // Retry once after 3s in case of a write delay
+      setTimeout(async () => {
+        const retry = await db.collection('forza_users').doc(user.uid).get();
+        if (retry.exists) {
+          state.profile = retry.data();
+          startApp();
+        } else {
+          // Genuinely no profile — only a real first-time master admin reaches here
+          renderFirstSetup();
+        }
+      }, 3000);
     }
   } else {
-    state.authUser     = null;
-    state.profile      = null;
+    state.authUser      = null;
+    state.profile       = null;
     state.activeEventId = null;
+    state._enrolling    = false;
     stopListeners();
     renderLogin();
   }
@@ -3403,23 +3417,29 @@ function renderLogin(errorMsg) {
       if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Completa todos los campos, incluyendo el código de invitación.'; }
       return;
     }
-    // Validate invite code — find active event with matching code
+    // Validate invite code — single-field query, validate status client-side
     let matchedEventId = null;
     try {
       const evSnap = await db.collection('forza_eventos')
         .where('inviteCode', '==', code)
-        .where('status', '==', 'active')
         .get();
       if (evSnap.empty) {
-        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Código de invitación inválido o el evento no está activo.'; }
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Código de invitación inválido.'; }
         return;
       }
-      matchedEventId = evSnap.docs[0].id;
+      const evDoc  = evSnap.docs[0];
+      const status = evDoc.data().status || 'active';
+      if (status === 'ended' || status === 'readonly') {
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Este evento ya no está activo. Contacta al administrador.'; }
+        return;
+      }
+      matchedEventId = evDoc.id;
     } catch(e) {
       if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Error al verificar código: ' + e.message; }
       return;
     }
     try {
+      state._enrolling = true; // block onAuthStateChanged from showing first-setup
       const cred = await auth.createUserWithEmailAndPassword(email, OPERATOR_PASSWORD);
       await db.collection('forza_users').doc(cred.user.uid).set({
         email,
@@ -3432,8 +3452,15 @@ function renderLogin(errorMsg) {
         inviteCode:    code,
         createdAt:     firebase.firestore.FieldValue.serverTimestamp(),
       });
-      // onAuthStateChanged fires → startApp() called automatically
+      state._enrolling = false;
+      // Profile is now written — set it locally and start the app
+      state.profile = {
+        email, name: `${first} ${last}`, role: 'operator',
+        assignedEvent: matchedEventId, assignedRoom: null,
+      };
+      startApp();
     } catch (e) {
+      state._enrolling = false;
       if (errEl) {
         errEl.style.display = 'block';
         errEl.textContent = e.code === 'auth/email-already-in-use'
