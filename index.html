@@ -1612,7 +1612,8 @@ function buildScanner(room, isAdmin) {
               const caps = track.getCapabilities ? track.getCapabilities() : {};
               const advanced = [];
               if (caps.focusMode?.includes('continuous')) advanced.push({ focusMode: 'continuous' });
-              if (caps.focusDistance) advanced.push({ focusDistance: caps.focusDistance.min ?? 0.1 });
+              // Use 0.15 not caps.focusDistance.min — min is often 0 which means infinity
+              if (caps.focusDistance) advanced.push({ focusDistance: 0.15 });
               if (caps.zoom && caps.zoom.max >= 1.5) advanced.push({ zoom: 1.5 });
               if (advanced.length) {
                 await track.applyConstraints({ advanced });
@@ -1638,6 +1639,35 @@ function buildScanner(room, isAdmin) {
             box.appendChild(debugBar);
 
             await vid.play();
+
+            // Torch toggle — injected after play() since torch requires an active stream
+            try {
+              const track = stream.getVideoTracks()[0];
+              const caps = track.getCapabilities ? track.getCapabilities() : {};
+              if (caps.torch) {
+                torchOn = false; // reset state for this camera session
+                const torchBtn = document.createElement('button');
+                torchBtn.id = 'torch-btn';
+                torchBtn.style.cssText = 'position:absolute;bottom:32px;right:10px;z-index:20;background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.3);border-radius:8px;color:#fff;font-size:18px;padding:6px 10px;cursor:pointer;line-height:1';
+                torchBtn.textContent = '🔦';
+                torchBtn.title = 'Linterna';
+                torchBtn.onclick = async (e) => {
+                  e.stopPropagation();
+                  torchOn = !torchOn;
+                  try {
+                    await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+                    torchBtn.style.background = torchOn ? 'rgba(255,220,0,0.7)' : 'rgba(0,0,0,0.55)';
+                    torchBtn.style.color = torchOn ? '#000' : '#fff';
+                    console.log('[CAM] Torch:', torchOn ? 'ON' : 'OFF');
+                  } catch(e) {
+                    console.warn('[CAM] Torch toggle failed:', e.message);
+                    torchOn = !torchOn; // revert state on failure
+                  }
+                };
+                box.appendChild(torchBtn);
+                console.log('[CAM] Torch available — button added');
+              }
+            } catch(e) { console.warn('[CAM] Torch detection failed:', e.message); }
             cameraActive = true;
             toggle.dataset.scanning = 'true';
             toggle.textContent = 'Detener escáner';
@@ -1674,16 +1704,18 @@ function buildScanner(room, isAdmin) {
 
 // ZXing reader — initialized once, reused every frame
 let _zxingReader = null;
+let torchOn    = false; // tracks torch state so stopCamera() can extinguish it
+let decodeLock = false; // prevents frame stacking in tickScan
 function getZXingReader() {
   if (_zxingReader) return _zxingReader;
   try {
     if (typeof ZXing !== 'undefined') {
       const hints = new Map();
       hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-      hints.set(ZXing.DecodeHintType.PURE_BARCODE, true); // skip preprocessing, treat frame as clean barcode
+      // PURE_BARCODE removed — it skips adaptive binarization which is essential for camera frames
       _zxingReader = new ZXing.MultiFormatReader();
       _zxingReader.setHints(hints);
-      console.log('[QR] ZXing reader initialized with TRY_HARDER + PURE_BARCODE');
+      console.log('[QR] ZXing reader initialized with TRY_HARDER');
     }
   } catch(e) { console.warn('[QR] ZXing init failed:', e.message); }
   return _zxingReader;
@@ -1691,46 +1723,66 @@ function getZXingReader() {
 
 function tickScan(video, canvas) {
   if (rafId) clearInterval(rafId);
+  decodeLock = false; // reset in case previous session left it stuck
 
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const reader = getZXingReader();
   console.log('[QR] Starting scan. Engine:', reader ? 'ZXing' : 'jsQR',
     '| video readyState:', video?.readyState,
     '| dimensions:', video?.videoWidth, 'x', video?.videoHeight);
 
-  // Fixed crop canvas — reused every frame to avoid GC pressure on mid-range devices
+  // Two reusable canvases — crop (60%) and full-frame — swapped based on consecutive failures
   const cropCanvas = document.createElement('canvas');
   const cropCtx    = cropCanvas.getContext('2d', { willReadFrequently: true });
+  const fullCanvas = document.createElement('canvas');
+  const fullCtx    = fullCanvas.getContext('2d', { willReadFrequently: true });
+
+  let consecutiveCropFails = 0;  // how many frames in a row the crop returned nothing
+  let useFullFrame         = false; // alternates after 30 consecutive crop misses
 
   rafId = setInterval(() => {
+    // Decode lock — skip this tick if previous frame's ZXing decode is still running
+    if (decodeLock) return;
+
     const liveVideo = document.getElementById('qr-video-live') || video;
     if (!liveVideo || liveVideo.readyState < 2 || liveVideo.videoWidth === 0 || liveVideo.paused) return;
 
+    decodeLock = true;
     try {
       const vw = liveVideo.videoWidth;
       const vh = liveVideo.videoHeight;
 
-      // Crop center 60% of the frame — eliminates background noise, reduces pixels ZXing processes
-      const cropW = Math.floor(vw * 0.6);
-      const cropH = Math.floor(vh * 0.6);
-      const cropX = Math.floor((vw - cropW) / 2);
-      const cropY = Math.floor((vh - cropH) / 2);
+      let activeCanvas, activeCtx, drawArgs;
 
-      if (cropCanvas.width !== cropW || cropCanvas.height !== cropH) {
-        cropCanvas.width  = cropW;
-        cropCanvas.height = cropH;
+      if (!useFullFrame) {
+        // Center 60% crop
+        const cropW = Math.floor(vw * 0.6);
+        const cropH = Math.floor(vh * 0.6);
+        const cropX = Math.floor((vw - cropW) / 2);
+        const cropY = Math.floor((vh - cropH) / 2);
+        if (cropCanvas.width !== cropW || cropCanvas.height !== cropH) {
+          cropCanvas.width = cropW; cropCanvas.height = cropH;
+        }
+        cropCtx.drawImage(liveVideo, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+        activeCanvas = cropCanvas; activeCtx = cropCtx;
+      } else {
+        // Full frame
+        if (fullCanvas.width !== vw || fullCanvas.height !== vh) {
+          fullCanvas.width = vw; fullCanvas.height = vh;
+        }
+        fullCtx.drawImage(liveVideo, 0, 0, vw, vh);
+        activeCanvas = fullCanvas; activeCtx = fullCtx;
       }
-      cropCtx.drawImage(liveVideo, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
 
-      // Also draw full frame to main canvas (used by ZXing luminance source)
-      canvas.width = cropW; canvas.height = cropH;
-      const mainCtx = canvas.getContext('2d', { willReadFrequently: true });
-      mainCtx.drawImage(liveVideo, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+      // Mirror active canvas into the shared canvas (ZXing luminance source reads from it)
+      canvas.width  = activeCanvas.width;
+      canvas.height = activeCanvas.height;
+      canvas.getContext('2d', { willReadFrequently: true })
+            .drawImage(activeCanvas, 0, 0);
 
-      const imageData = cropCtx.getImageData(0, 0, cropW, cropH);
+      let decoded = false;
 
       if (reader) {
-        // ZXing path — uses HTMLCanvasElementLuminanceSource on the cropped canvas
+        // ZXing path
         try {
           const luminance = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
           const binarized = new ZXing.HybridBinarizer(luminance);
@@ -1738,34 +1790,71 @@ function tickScan(video, canvas) {
           const result    = reader.decode(bitmap);
           if (result?.getText()?.trim()) {
             const raw = result.getText().trim();
-            console.log('[QR] ZXing hit:', raw);
-            // Stop scanning immediately to prevent double-scans
+            console.log('[QR] ZXing hit (' + (useFullFrame ? 'full' : 'crop') + '):', raw);
+            decoded = true;
             clearInterval(rafId); rafId = null;
+            decodeLock = false;
             handleScan(raw);
+            return;
           }
         } catch(e) {
-          // NotFoundException thrown every frame when no QR visible — suppress it
           if (!e.message?.includes('NotFoundException') && !e.name?.includes('NotFoundException')) {
             console.warn('[QR] ZXing error:', e.message);
           }
         }
       } else {
         // jsQR fallback
+        const imageData = activeCtx.getImageData(0, 0, activeCanvas.width, activeCanvas.height);
         const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
         if (code?.data?.trim()) {
-          console.log('[QR] jsQR hit:', code.data.trim().substring(0, 50));
+          console.log('[QR] jsQR hit (' + (useFullFrame ? 'full' : 'crop') + '):', code.data.trim().substring(0, 50));
+          decoded = true;
+          decodeLock = false;
           handleScan(code.data.trim());
+          return;
+        }
+      }
+
+      // Alternating crop / full-frame logic
+      if (!decoded) {
+        if (!useFullFrame) {
+          consecutiveCropFails++;
+          if (consecutiveCropFails >= 30) {
+            useFullFrame = true;
+            consecutiveCropFails = 0;
+            console.log('[QR] Switching to full-frame after 30 crop misses');
+          }
+        } else {
+          // After one full-frame pass with no result, switch back to crop
+          useFullFrame = false;
+          consecutiveCropFails = 0;
+          console.log('[QR] Returning to crop mode');
         }
       }
     } catch (e) {
       console.warn('[QR] Frame error:', e.message);
+    } finally {
+      // Always release the lock so the next tick can run
+      decodeLock = false;
     }
-  }, 80); // 80ms ≈ 12fps — more than double the previous 5fps attempt rate
+  }, 80);
 }
 
 function stopCamera() {
   if (rafId) { clearInterval(rafId); rafId = null; }
-  if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
+  decodeLock = false;
+  if (videoStream) {
+    // Extinguish torch before stopping the track so it doesn't stay on
+    if (torchOn) {
+      try {
+        const track = videoStream.getVideoTracks()[0];
+        if (track) track.applyConstraints({ advanced: [{ torch: false }] }).catch(() => {});
+      } catch(e) { /* ignore */ }
+      torchOn = false;
+    }
+    videoStream.getTracks().forEach(t => t.stop());
+    videoStream = null;
+  }
   cameraActive = false;
 }
 
