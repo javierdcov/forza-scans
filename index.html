@@ -297,6 +297,15 @@ input:checked + .swss::before { transform:translateX(12px) }
 .shift-config-hdr { display:flex; align-items:center; padding:10px 12px; background:var(--surface2) }
 .shift-config-times { display:flex; align-items:center; padding:8px 12px; flex-wrap:wrap; gap:4px }
 
+/* ── EVENT DASHBOARD ── */
+.event-dashboard { max-width:430px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column }
+.event-card { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--rl); padding:14px; margin-bottom:10px; cursor:pointer; transition:border-color .15s; display:flex; align-items:center; gap:12px }
+.event-card:hover { border-color:var(--border2) }
+.event-card-body { flex:1; min-width:0 }
+.event-card-name { font-size:14px; font-weight:700; margin-bottom:3px }
+.event-card-meta { font-size:11px; color:var(--text2) }
+.event-card-arrow { font-size:18px; color:var(--text3); flex-shrink:0 }
+
 </style>
 </head>
 <body>
@@ -388,21 +397,23 @@ if ('serviceWorker' in navigator)
 
 // ── State ─────────────────────────────────────────────────────
 let state = {
-  authUser:     null,   // Firebase auth user
-  profile:      null,   // Firestore user profile {role, name, assignedRoom}
-  event:        null,   // current event doc
-  rooms:        [],     // live array of room docs
-  activeRoomId: null,   // which room this device is viewing
-  scans:        [],     // live scans for active room (today)
-  shifts:       [],     // live shifts for active room (shiftsDate)
-  shiftsDate:   null,   // date shown in Turnos tab — null = today()
-  appMode:      null,   // 'startup' | 'login' | 'operator' | 'admin'
-  view:         'scanner', // current tab
-  geo:          null,
+  authUser:      null,   // Firebase auth user
+  profile:       null,   // Firestore user profile {role, name, assignedRoom, assignedEvent}
+  event:         null,   // current event doc
+  events:        [],     // master admin: list of all events
+  activeEventId: null,   // which event is in context — source of truth for all Firestore paths
+  rooms:         [],     // live array of room docs
+  activeRoomId:  null,   // which room this device is viewing
+  scans:         [],     // live scans for active room (today)
+  shifts:        [],     // live shifts for active room (shiftsDate)
+  shiftsDate:    null,   // date shown in Turnos tab — null = today()
+  appMode:       null,   // 'startup' | 'login' | 'operator' | 'admin'
+  view:          'scanner', // current tab
+  geo:           null,
   unsubscribers: [],
-  googleToken:  null,   // OAuth access token for Google APIs
-  googleTokenExpiry: 0, // timestamp when token expires
-  shiftsReady:  false,  // true after first shifts snapshot returns — prevents false block on page reload
+  googleToken:   null,   // OAuth access token for Google APIs
+  googleTokenExpiry: 0,  // timestamp when token expires
+  shiftsReady:   false,  // true after first shifts snapshot returns — prevents false block on page reload
 };
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -439,14 +450,14 @@ function generateInviteCode() {
 }
 
 // ── Firestore paths ───────────────────────────────────────────
-const eventDocRef   = () => doc(db, DB_ROOT, 'current_event');
-const roomsColRef   = () => collection(db, DB_ROOT, 'current_event', 'rooms');
-const roomDocRef    = id => doc(db, DB_ROOT, 'current_event', 'rooms', id);
+const eventDocRef   = () => doc(db, DB_ROOT, state.activeEventId);
+const roomsColRef   = () => collection(db, DB_ROOT, state.activeEventId, 'rooms');
+const roomDocRef    = id => doc(db, DB_ROOT, state.activeEventId, 'rooms', id);
 const usersColRef   = () => collection(db, 'forza_users');
 const userDocRef    = uid => doc(db, 'forza_users', uid);
-const scansColRef   = roomId => collection(db, DB_ROOT, 'current_event', 'rooms', roomId, 'scans');
-const shiftsColRef  = roomId => collection(db, DB_ROOT, 'current_event', 'rooms', roomId, 'shifts');
-const shiftDocRef   = (roomId, shiftId) => doc(db, DB_ROOT, 'current_event', 'rooms', roomId, 'shifts', shiftId);
+const scansColRef   = roomId => collection(db, DB_ROOT, state.activeEventId, 'rooms', roomId, 'scans');
+const shiftsColRef  = roomId => collection(db, DB_ROOT, state.activeEventId, 'rooms', roomId, 'shifts');
+const shiftDocRef   = (roomId, shiftId) => doc(db, DB_ROOT, state.activeEventId, 'rooms', roomId, 'shifts', shiftId);
 
 // ── Auth state ────────────────────────────────────────────────
 auth.onAuthStateChanged(async user => {
@@ -462,12 +473,12 @@ auth.onAuthStateChanged(async user => {
       }
       startApp();
     } else {
-      // First login — create profile (master admin path)
       renderFirstSetup();
     }
   } else {
-    state.authUser = null;
-    state.profile  = null;
+    state.authUser     = null;
+    state.profile      = null;
+    state.activeEventId = null;
     stopListeners();
     renderLogin();
   }
@@ -483,7 +494,7 @@ function stopListeners() {
 function startListeners(roomId) {
   stopListeners();
 
-  const base = db.collection('forza_eventos').doc('current_event');
+  const base = db.collection('forza_eventos').doc(state.activeEventId);
 
   // Event doc
   const u1 = base.onSnapshot(snap => {
@@ -678,7 +689,7 @@ function dlFile(content, filename, type) {
 
 async function exportForzaCSV(roomId) {
   const room  = state.rooms.find(r => r.id === roomId);
-  const snap  = await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(roomId).collection('scans').get();
+  const snap  = await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(roomId).collection('scans').get();
   const scans = snap.docs.map(d => d.data()).filter(s => s.type === 'scan');
   const rows  = [['Fecha','Turno','Hora','Fecha_Hora','Resultado','Codigo','Nombre','Estado','Deporte','Categorias','Comedor','Lat','Lng']];
   scans.forEach(s => rows.push([
@@ -696,7 +707,7 @@ async function exportGovReport(roomId, shiftId) {
   const room      = state.rooms.find(r => r.id === roomId);
   const shiftSnap = await getDoc(shiftDocRef(roomId, shiftId));
   const shift     = { id: shiftId, ...shiftSnap.data() };
-  const allScans  = (await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(roomId).collection('scans').get()).docs.map(d => d.data()).filter(s => s.shiftId === shiftId);
+  const allScans  = (await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(roomId).collection('scans').get()).docs.map(d => d.data()).filter(s => s.shiftId === shiftId);
   const present   = allScans.filter(s => s.type === 'scan' && (s.result?.result === 'granted' || s.result?.result === 'auto-added'));
   const noShows   = allScans.filter(s => s.type === 'noshow' || s.type === 'manual-noshow');
   const geo       = shift.location || state.geo;
@@ -840,10 +851,14 @@ function buildApp(isAdmin, room) {
 
   // Header
   const hdr = el('div', 'hdr');
+  const isMasterAdmin = state.profile?.role === 'master_admin';
   hdr.innerHTML = `
-    <div>
-      <div class="hdr-title">${state.event?.name || 'Forza Scans'}</div>
-      <div class="hdr-sub">${room?.name || '—'}</div>
+    <div style="display:flex;align-items:center;gap:8px;min-width:0">
+      ${isMasterAdmin ? `<button class="icon-btn" id="btn-back-eventos" title="Volver a eventos" style="font-size:13px;font-weight:700;color:var(--blue);white-space:nowrap">← Eventos</button>` : ''}
+      <div style="min-width:0">
+        <div class="hdr-title" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${state.event?.name || 'Forza Scans'}</div>
+        <div class="hdr-sub">${room?.name || '—'}</div>
+      </div>
     </div>
     <div class="hdr-right">
       <span class="badge ${isAdmin ? 'badge-blue' : 'badge-amber'}">${isAdmin ? 'Admin' : 'Op'}</span>
@@ -895,10 +910,20 @@ else if (state.view === 'reports')        pg.appendChild(buildReports(room));
   else if (state.view === 'global-admin')   pg.appendChild(buildGlobalAdmin());
   wrap.appendChild(pg);
 
-  // Wire signout
+  // Wire signout + back button
   setTimeout(() => {
     const so = document.getElementById('btn-signout');
     if (so) so.onclick = () => { if (confirm('¿Cerrar sesión?')) signOut(auth); };
+    const back = document.getElementById('btn-back-eventos');
+    if (back) back.onclick = () => {
+      stopListeners();
+      state.activeEventId = null;
+      state.rooms  = [];
+      state.scans  = [];
+      state.shifts = [];
+      state.event  = null;
+      renderEventDashboard();
+    };
   }, 0);
 
   return wrap;
@@ -1129,7 +1154,7 @@ function buildShiftsTab(room) {
                 btn.disabled = true;
                 btn.textContent = 'Cargando…';
                 try {
-                  const snap = await db.collection('forza_eventos').doc('current_event')
+                  const snap = await db.collection('forza_eventos').doc(state.activeEventId)
                     .collection('rooms').doc(state.activeRoomId)
                     .collection('scans')
                     .where('shiftId', '==', sh.id)
@@ -1212,7 +1237,7 @@ function openShiftModal(def, existing, room) {
         closeModal();
         try {
           const newShiftRef = db
-            .collection('forza_eventos').doc('current_event')
+            .collection('forza_eventos').doc(state.activeEventId)
             .collection('rooms').doc(roomId)
             .collection('shifts').doc();
           await newShiftRef.set({
@@ -2313,7 +2338,7 @@ async function exportRoomToSheet(roomId, statusCallback) {
   statusCallback?.('Buscando registros nuevos…');
   // Fetch all scans and filter in memory — Firestore != operator excludes docs
   // where the field doesn't exist, which would miss all pre-feature scan docs
-  const snap = await db.collection('forza_eventos').doc('current_event')
+  const snap = await db.collection('forza_eventos').doc(state.activeEventId)
     .collection('rooms').doc(roomId)
     .collection('scans')
     .get();
@@ -2558,7 +2583,7 @@ function buildRoomAdmin(room) {
         if (!newCfg[def.id]) newCfg[def.id] = { enabled: true };
         newCfg[def.id].start = start;
         newCfg[def.id].end   = end;
-        await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ shiftConfig: newCfg });
+        await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ shiftConfig: newCfg });
         const btn = document.getElementById(`shift-save-${def.id}`);
         if (btn) { btn.textContent = '✓'; setTimeout(() => { btn.textContent = 'Guardar'; }, 1500); }
       };
@@ -2649,7 +2674,7 @@ function buildRoomAdmin(room) {
             cats.forEach(c => { if (!newAcc[sp].states[st].cats[c]) newAcc[sp].states[st].cats[c] = { enabled: true }; });
           });
         });
-        await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+        await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
         showMsg(`✓ "${name}" importado y fusionado desde Drive.`, 'g');
       } catch(e) {
         if (e.message !== 'cancelled') showMsg(`Error: ${e.message}`, 'r');
@@ -2688,7 +2713,7 @@ function buildRoomAdmin(room) {
             cats.forEach(c => { if (!newAcc[sp].states[st].cats[c]) newAcc[sp].states[st].cats[c] = { enabled: true }; });
           });
         });
-        await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+        await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
         upMsg.textContent = `✓ "${file.name}" importado y fusionado.`;
         upMsg.className = 'ibar ibar-g';
       } catch { upMsg.textContent = 'Error al procesar el archivo.'; upMsg.className = 'ibar ibar-r'; }
@@ -2696,7 +2721,7 @@ function buildRoomAdmin(room) {
     $('add-sport-btn')?.addEventListener('click', async () => {
       const v = $('new-sport-input')?.value.trim(); if (!v) return;
       const newAcc = { ...(room.access || {}), [v]: { enabled: true, states: {} } };
-      await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+      await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
     });
   }, 0);
 
@@ -2716,7 +2741,7 @@ function buildSportBlock(room, sport, sObj) {
     const newAcc = JSON.parse(JSON.stringify(room.access));
     newAcc[sport].enabled = val;
     Object.values(newAcc[sport].states).forEach(s => { s.enabled = val; Object.values(s.cats).forEach(c => c.enabled = val); });
-    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+    await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
   });
   hdr.appendChild(sw);
 
@@ -2726,7 +2751,7 @@ function buildSportBlock(room, sport, sObj) {
     if (!confirm(`¿Eliminar "${sport}"?`)) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     delete newAcc[sport];
-    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+    await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
   };
   hdr.appendChild(delBtn);
 
@@ -2744,7 +2769,7 @@ function buildSportBlock(room, sport, sObj) {
     const v = addStRow.querySelector('input').value.trim(); if (!v) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     if (!newAcc[sport].states[v]) newAcc[sport].states[v] = { enabled: true, cats: {} };
-    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+    await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
   };
   body.appendChild(addStRow);
   block.appendChild(hdr); block.appendChild(body);
@@ -2759,7 +2784,7 @@ function buildStateBlock(room, sport, state2, stObj) {
     const newAcc = JSON.parse(JSON.stringify(room.access));
     newAcc[sport].states[state2].enabled = val;
     Object.values(newAcc[sport].states[state2].cats).forEach(c => c.enabled = val);
-    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+    await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
   }, 'sm');
   hdr.appendChild(sw);
   const delBtn = el('button', 'del-btn', '✕');
@@ -2768,7 +2793,7 @@ function buildStateBlock(room, sport, state2, stObj) {
     if (!confirm(`¿Eliminar "${state2}"?`)) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     delete newAcc[sport].states[state2];
-    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+    await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
   };
   hdr.appendChild(delBtn);
 
@@ -2781,14 +2806,14 @@ function buildStateBlock(room, sport, state2, stObj) {
     row.appendChild(buildToggle(catObj.enabled, async val => {
       const newAcc = JSON.parse(JSON.stringify(room.access));
       newAcc[sport].states[state2].cats[cat].enabled = val;
-      await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+      await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
     }, 'sm'));
     const d = el('button', 'del-btn', '✕');
     d.onclick = async () => {
       if (!confirm(`¿Eliminar "${cat}"?`)) return;
       const newAcc = JSON.parse(JSON.stringify(room.access));
       delete newAcc[sport].states[state2].cats[cat];
-      await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+      await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
     };
     row.appendChild(d);
     body.appendChild(row);
@@ -2800,7 +2825,7 @@ function buildStateBlock(room, sport, state2, stObj) {
     const v = addCatRow.querySelector('input').value.trim(); if (!v) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     newAcc[sport].states[state2].cats[v] = { enabled: true };
-    await db.collection('forza_eventos').doc('current_event').collection('rooms').doc(room.id).update({ access: newAcc });
+    await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
   };
   body.appendChild(addCatRow);
   block.appendChild(hdr); block.appendChild(body);
@@ -2846,7 +2871,7 @@ function buildGlobalAdmin() {
         <div style="font-size:11px;color:var(--text2);margin-top:2px">${appEnabled ? 'Operadores y admins pueden acceder.' : 'Solo el administrador maestro puede entrar.'}</div>
       </div>`;
     const lockToggle = buildToggle(appEnabled, async val => {
-      await db.collection('forza_eventos').doc('current_event').set({ appEnabled: val }, { merge: true });
+      await db.collection('forza_eventos').doc(state.activeEventId).set({ appEnabled: val }, { merge: true });
     });
     lockRow.appendChild(lockToggle);
     lockCard.appendChild(lockRow);
@@ -2891,15 +2916,33 @@ function buildGlobalAdmin() {
     wrap.appendChild(admNote);
 
     const addAdminBlock = el('div', 'add-admin-block');
+    // Build event options for dropdown — load async after render
     addAdminBlock.innerHTML = `
       <input class="minput" id="new-admin-email" type="email" placeholder="Email del nuevo admin" style="width:100%;margin-bottom:6px"/>
       <div class="mrow">
         <input class="minput" id="new-admin-pass" type="password" placeholder="Contraseña temporal"/>
         <input class="minput" id="new-admin-name" placeholder="Nombre"/>
       </div>
+      <select class="minput" id="new-admin-event" style="width:100%;margin-bottom:6px">
+        <option value="${state.activeEventId}">${state.event?.name || state.activeEventId} (actual)</option>
+      </select>
       <button class="btn-sm btn-sm-blue" id="create-admin-btn" style="width:100%;padding:9px;margin-bottom:6px">Crear cuenta de admin</button>
       <div id="admin-msg"></div>`;
     wrap.appendChild(addAdminBlock);
+
+    // Populate event dropdown async
+    db.collection('forza_eventos').get().then(snap => {
+      const sel = $('new-admin-event');
+      if (!sel) return;
+      sel.innerHTML = '';
+      snap.docs.filter(d => d.data().status !== 'ended').forEach(d => {
+        const opt = document.createElement('option');
+        opt.value = d.id;
+        opt.textContent = d.data().name || d.id;
+        if (d.id === state.activeEventId) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    });
 
     // List existing admins
     const adminListWrap = el('div', ''); adminListWrap.id = 'admin-list'; wrap.appendChild(adminListWrap);
@@ -2908,14 +2951,14 @@ function buildGlobalAdmin() {
 
   const div3 = el('div', 'sdiv'); wrap.appendChild(div3);
 
-  // Export + new event
+  // Export + end event
   const evtBox = el('div', 'export-box');
   evtBox.innerHTML = `
-    <div style="font-size:13px;font-weight:700;margin-bottom:3px">Exportar${isMasterAdmin ? ' y nuevo evento' : ''}</div>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Descarga todos los registros${isMasterAdmin ? ' y limpia la configuración.' : '.'}</div>
-    <div style="display:flex;gap:8px">
-      <button class="btn-sm btn-sm-green" style="flex:1;padding:9px" onclick="exportAllCSV()">Exportar todos (CSV)</button>
-      ${isMasterAdmin ? `<button class="btn-sm btn-sm-red" style="flex:1;padding:9px" onclick="newEvent()">Nuevo evento</button>` : ''}
+    <div style="font-size:13px;font-weight:700;margin-bottom:3px">Exportar${isMasterAdmin ? ' y gestión del evento' : ''}</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Descarga todos los registros${isMasterAdmin ? ' o finaliza el evento.' : '.'}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn-sm btn-sm-green" style="flex:1;padding:9px;min-width:120px" onclick="exportAllCSV()">Exportar todos (CSV)</button>
+      ${isMasterAdmin ? `<button class="btn-sm btn-sm-red" style="flex:1;padding:9px;min-width:120px" id="btn-end-event">Finalizar evento</button>` : ''}
     </div>`;
   wrap.appendChild(evtBox);
 
@@ -2958,6 +3001,7 @@ function buildGlobalAdmin() {
       const newId = $('migrate-confirm-delete')?.dataset.newId;
       if (newId) deleteCurrentEventAfterMigration(newId);
     });
+    $('btn-end-event')?.addEventListener('click', endEvent);
   }, 0);
 
   return wrap;
@@ -2980,17 +3024,25 @@ async function loadAdminList(container) {
 }
 
 async function createAdminAccount() {
-  const email = $('new-admin-email')?.value.trim();
-  const pass  = $('new-admin-pass')?.value.trim();
-  const name  = $('new-admin-name')?.value.trim();
-  const msg   = $('admin-msg');
+  const email   = $('new-admin-email')?.value.trim();
+  const pass    = $('new-admin-pass')?.value.trim();
+  const name    = $('new-admin-name')?.value.trim();
+  const eventId = $('new-admin-event')?.value.trim() || state.activeEventId;
+  const msg     = $('admin-msg');
   if (!email || !pass) { if (msg) { msg.className = 'ibar ibar-r'; msg.textContent = 'Email y contraseña requeridos.'; } return; }
+  if (!eventId) { if (msg) { msg.className = 'ibar ibar-r'; msg.textContent = 'Selecciona un evento para asignar al admin.'; } return; }
   try {
     const cred = await auth.createUserWithEmailAndPassword(email, pass);
-    await setDoc(userDocRef(cred.user.uid), { email, name: name || email, role: 'admin', createdAt: serverTimestamp() });
-    // Sign back in as master admin — user stays logged in because createUser auto-signs in
-    // We store the new user profile but we need to re-auth as ourselves
-    if (msg) { msg.className = 'ibar ibar-g'; msg.textContent = `✓ Cuenta creada para ${email}. Pide al admin que cambie su contraseña al primer inicio.`; }
+    await setDoc(userDocRef(cred.user.uid), {
+      email, name: name || email, role: 'admin',
+      assignedEvent: eventId, assignedRoom: null,
+      createdAt: serverTimestamp(),
+    });
+    // Add uid to event admins array
+    await db.collection('forza_eventos').doc(eventId).update({
+      admins: firebase.firestore.FieldValue.arrayUnion(cred.user.uid),
+    });
+    if (msg) { msg.className = 'ibar ibar-g'; msg.textContent = `✓ Cuenta creada para ${email}.`; }
   } catch (e) {
     if (msg) { msg.className = 'ibar ibar-r'; msg.textContent = e.message; }
   }
@@ -3009,6 +3061,23 @@ window.deleteRoom = async id => {
 };
 
 window.exportAllCSV = () => state.rooms.forEach(r => exportForzaCSV(r.id));
+
+// ── End Event ─────────────────────────────────────────────────
+async function endEvent() {
+  const eventName = state.event?.name || state.activeEventId;
+  if (!confirm(`¿Finalizar el evento "${eventName}"?\n\nSe activará el modo solo lectura por 30 días. Los operadores y admins no podrán registrar nuevos scans.`)) return;
+  try {
+    const readonlyUntil = new Date();
+    readonlyUntil.setDate(readonlyUntil.getDate() + 30);
+    await db.collection('forza_eventos').doc(state.activeEventId).update({
+      status:        'readonly',
+      readonlyUntil: firebase.firestore.Timestamp.fromDate(readonlyUntil),
+    });
+    alert(`Evento finalizado. Los registros estarán disponibles en modo solo lectura hasta el ${readonlyUntil.toLocaleDateString('es-MX')}.`);
+  } catch(e) {
+    alert('Error al finalizar evento: ' + e.message);
+  }
+}
 
 // ── Migration tool — current_event → forza_eventos/{newId} ───
 async function migrateCurrentEvent() {
@@ -3252,6 +3321,8 @@ function renderLogin(errorMsg) {
 
       <div id="login-enroll-block" class="login-form" style="display:none;margin-top:18px">
         <div class="startup-sub" style="margin-bottom:16px">Registro de operador</div>
+        <label class="form-label">Código de invitación</label>
+        <input class="minput" id="enroll-code" placeholder="Código de 6 caracteres" style="width:100%;margin-bottom:10px;text-transform:uppercase;letter-spacing:.1em"/>
         <label class="form-label">Nombre</label>
         <input class="minput" id="enroll-first" placeholder="Nombre" style="width:100%;margin-bottom:10px"/>
         <label class="form-label">Apellido</label>
@@ -3322,25 +3393,44 @@ function renderLogin(errorMsg) {
 
   // Operator enrollment
   const doEnroll = async () => {
+    const code  = $('enroll-code')?.value.trim().toUpperCase();
     const first = $('enroll-first')?.value.trim();
     const last  = $('enroll-last')?.value.trim();
     const email = $('enroll-email')?.value.trim();
     const errEl = $('enroll-err');
     if (errEl) errEl.style.display = 'none';
-    if (!first || !last || !email) {
-      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Completa todos los campos.'; }
+    if (!code || !first || !last || !email) {
+      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Completa todos los campos, incluyendo el código de invitación.'; }
+      return;
+    }
+    // Validate invite code — find active event with matching code
+    let matchedEventId = null;
+    try {
+      const evSnap = await db.collection('forza_eventos')
+        .where('inviteCode', '==', code)
+        .where('status', '==', 'active')
+        .get();
+      if (evSnap.empty) {
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Código de invitación inválido o el evento no está activo.'; }
+        return;
+      }
+      matchedEventId = evSnap.docs[0].id;
+    } catch(e) {
+      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Error al verificar código: ' + e.message; }
       return;
     }
     try {
       const cred = await auth.createUserWithEmailAndPassword(email, OPERATOR_PASSWORD);
       await db.collection('forza_users').doc(cred.user.uid).set({
         email,
-        name:         `${first} ${last}`,
-        firstName:    first,
-        lastName:     last,
-        role:         'operator',
-        assignedRoom: null,
-        createdAt:    firebase.firestore.FieldValue.serverTimestamp(),
+        name:          `${first} ${last}`,
+        firstName:     first,
+        lastName:      last,
+        role:          'operator',
+        assignedEvent: matchedEventId,
+        assignedRoom:  null,
+        inviteCode:    code,
+        createdAt:     firebase.firestore.FieldValue.serverTimestamp(),
       });
       // onAuthStateChanged fires → startApp() called automatically
     } catch (e) {
@@ -3378,8 +3468,15 @@ function renderFirstSetup() {
         email: state.authUser.email, name, role: 'master_admin', createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
       // Create default event + first room
-      await db.collection('forza_eventos').doc('current_event').set({ name: 'Olimpiada Nacional 2026', createdAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      await db.collection('forza_eventos').doc('current_event').collection('rooms').doc().set({ name: 'Comedor Principal', access: buildSeedAccess(), pin: '', createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+      const newEventRef = db.collection('forza_eventos').doc();
+      state.activeEventId = newEventRef.id;
+      await newEventRef.set({
+        name: 'Olimpiada Nacional 2026', status: 'active', appEnabled: true,
+        inviteCode: generateInviteCode(), ownedBy: state.authUser.uid,
+        admins: [], createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        readonlyUntil: null, sheetId: null, sheetName: null,
+      });
+      await newEventRef.collection('rooms').doc().set({ name: 'Comedor Principal', access: buildSeedAccess(), pin: '', createdAt: firebase.firestore.FieldValue.serverTimestamp() });
       state.profile = { role: 'master_admin', name };
       startApp();
     } catch (e) {
@@ -3387,6 +3484,187 @@ function renderFirstSetup() {
       if (errEl) { errEl.style.display = 'block'; errEl.textContent = e.message; }
     }
   });
+}
+
+// ── Event dashboard (master admin only) ──────────────────────
+async function renderEventDashboard() {
+  const root = $('root');
+  if (!root) return;
+
+  root.innerHTML = `
+    <div class="event-dashboard">
+      <div class="hdr">
+        <div>
+          <div class="hdr-title">Forza Scans</div>
+          <div class="hdr-sub">Administrador Maestro</div>
+        </div>
+        <div class="hdr-right">
+          <button class="icon-btn" id="dash-signout" title="Cerrar sesión">⏻</button>
+        </div>
+      </div>
+      <div class="pg" id="dash-body">
+        <div class="sl" style="margin-bottom:10px">EVENTOS</div>
+        <div id="events-list"><div class="lempty">Cargando eventos…</div></div>
+        <button class="btn btn-blue" id="btn-create-event" style="margin-top:10px">+ Crear nuevo evento</button>
+      </div>
+    </div>`;
+
+  $('dash-signout')?.addEventListener('click', () => { if (confirm('¿Cerrar sesión?')) auth.signOut(); });
+  $('btn-create-event')?.addEventListener('click', showCreateEventModal);
+
+  // Load all events
+  try {
+    const snap = await db.collection('forza_eventos').orderBy('createdAt', 'desc').get();
+    const list = $('events-list');
+    if (!list) return;
+    const events = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .filter(e => e.id !== 'current_event' || e.status); // hide bare current_event if no status
+    if (events.length === 0) {
+      list.innerHTML = '<div class="lempty">No hay eventos aún. Crea uno nuevo.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    events.forEach(ev => {
+      const statusBadge = {
+        active:   '<span class="badge badge-green">Activo</span>',
+        readonly: '<span class="badge badge-amber">Solo lectura</span>',
+        ended:    '<span class="badge badge-red">Finalizado</span>',
+      }[ev.status] || '<span class="badge badge-blue">Activo</span>';
+      const card = el('div', 'event-card');
+      card.innerHTML = `
+        <div class="event-card-body">
+          <div class="event-card-name">${ev.name || ev.id}</div>
+          <div class="event-card-meta">${statusBadge} &nbsp;·&nbsp; Código: <strong>${ev.inviteCode || '—'}</strong></div>
+        </div>
+        <div class="event-card-arrow">›</div>`;
+      card.onclick = () => enterEventContext(ev.id);
+      list.appendChild(card);
+    });
+  } catch(e) {
+    const list = $('events-list');
+    if (list) list.innerHTML = `<div class="ibar ibar-r">Error cargando eventos: ${e.message}</div>`;
+  }
+}
+
+function showCreateEventModal() {
+  showModal(`
+    <div class="modal-title">Crear nuevo evento</div>
+    <div class="modal-sub">Se generará un ID único y un código de invitación automáticamente.</div>
+    <label class="form-label">Nombre del evento</label>
+    <input class="minput" id="new-event-name" placeholder="ej. Olimpiada Nacional 2027" style="width:100%;margin-bottom:16px"/>
+    <div id="create-event-err" class="ibar ibar-r" style="display:none;margin-bottom:8px"></div>
+    <div style="display:flex;gap:8px">
+      <button class="btn-sm btn-sm-ghost" data-action="cancel">Cancelar</button>
+      <button class="btn-sm btn-sm-green" data-action="create-event">Crear evento</button>
+    </div>`,
+    {
+      'cancel': () => closeModal(),
+      'create-event': async () => {
+        const name = $('new-event-name')?.value.trim();
+        const errEl = $('create-event-err');
+        if (!name) { if (errEl) { errEl.style.display='block'; errEl.textContent='El nombre es obligatorio.'; } return; }
+        const btn = document.querySelector('[data-action="create-event"]');
+        if (btn) { btn.disabled = true; btn.textContent = 'Creando…'; }
+        try {
+          const newRef = db.collection('forza_eventos').doc();
+          await newRef.set({
+            name,
+            inviteCode:  generateInviteCode(),
+            status:      'active',
+            ownedBy:     state.authUser.uid,
+            admins:      [],
+            appEnabled:  true,
+            createdAt:   firebase.firestore.FieldValue.serverTimestamp(),
+            readonlyUntil: null,
+            sheetId:     null,
+            sheetName:   null,
+          });
+          // Create a default room
+          await newRef.collection('rooms').doc().set({
+            name: 'Comedor Principal', access: buildSeedAccess(), pin: '', createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+          closeModal();
+          renderEventDashboard(); // refresh list
+        } catch(e) {
+          if (errEl) { errEl.style.display='block'; errEl.textContent=e.message; }
+          if (btn) { btn.disabled=false; btn.textContent='Crear evento'; }
+        }
+      }
+    }
+  );
+  setTimeout(() => $('new-event-name')?.focus(), 50);
+}
+
+function enterEventContext(eventId) {
+  state.activeEventId = eventId;
+  state.rooms  = [];
+  state.scans  = [];
+  state.shifts = [];
+  state.event  = null;
+  state.view   = 'scanner';
+  checkEventStatusThenEnter();
+}
+
+// ── Readonly / Ended screens ──────────────────────────────────
+function renderReadonlyScreen(eventData) {
+  const root = $('root');
+  if (!root) return;
+  const until = eventData.readonlyUntil?.toDate ? eventData.readonlyUntil.toDate() : null;
+  const untilStr = until ? until.toLocaleDateString('es-MX') : '—';
+
+  root.innerHTML = '';
+  const wrap = el('div', 'event-dashboard');
+  wrap.innerHTML = `
+    <div class="hdr">
+      <div>
+        <div class="hdr-title">${eventData.name || 'Evento'}</div>
+        <div class="hdr-sub">Solo lectura</div>
+      </div>
+      <div class="hdr-right">
+        <button class="icon-btn" id="ro-signout">⏻</button>
+      </div>
+    </div>
+    <div class="pg">
+      <div class="ibar ibar-a" style="margin-bottom:16px">
+        <strong>Evento finalizado</strong><br>
+        Acceso en modo solo lectura hasta el ${untilStr}. No se pueden registrar nuevos scans.
+      </div>
+      <div class="sl">DESCARGAR REGISTROS</div>
+      <div id="ro-rooms-list"></div>
+    </div>`;
+  root.appendChild(wrap);
+
+  setTimeout(() => {
+    $('ro-signout')?.addEventListener('click', () => { if (confirm('¿Cerrar sesión?')) auth.signOut(); });
+  }, 0);
+
+  // Load rooms for CSV download
+  db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').get().then(snap => {
+    const list = $('ro-rooms-list');
+    if (!list) return;
+    snap.docs.forEach(d => {
+      const room = { id: d.id, ...d.data() };
+      const btn = el('button', 'btn btn-ghost');
+      btn.style.marginBottom = '8px';
+      btn.textContent = `⬇ CSV — ${room.name}`;
+      btn.onclick = () => exportForzaCSV(room.id);
+      list.appendChild(btn);
+    });
+  });
+}
+
+function renderEndedScreen(eventData) {
+  const root = $('root');
+  if (!root) return;
+  root.innerHTML = '';
+  const wrap = el('div', 'startup');
+  wrap.innerHTML = `
+    <div class="startup-brand">Forza Scans</div>
+    <div class="startup-title">Evento finalizado</div>
+    <div class="startup-sub">Este evento ha concluido y ya no está disponible.<br>Contacta al administrador maestro.</div>
+    <button class="startup-go" style="max-width:320px" id="ended-signout">Cerrar sesión</button>`;
+  root.appendChild(wrap);
+  setTimeout(() => $('ended-signout')?.addEventListener('click', () => auth.signOut()), 0);
 }
 
 // ── Auto-close shift ─────────────────────────────────────────
@@ -3447,20 +3725,65 @@ function stopAutoCloseTimer() {
 
 // ── Startup mode selector ─────────────────────────────────────
 function startApp() {
-  geo(); // get location
-  const role = state.profile?.role;
+  geo();
+  const role    = state.profile?.role;
+  const isMaster = role === 'master_admin';
+  const isAdmin  = isMaster || role === 'admin';
+
+  if (isMaster && !state.activeEventId) {
+    // Master admin with no event selected → show event dashboard
+    renderEventDashboard();
+    return;
+  }
+
+  // For non-master users, activeEventId comes from their profile
+  if (!isMaster && !state.activeEventId) {
+    const assigned = state.profile?.assignedEvent;
+    if (!assigned) {
+      renderLogin('Tu cuenta no tiene un evento asignado. Contacta al administrador.');
+      return;
+    }
+    state.activeEventId = assigned;
+  }
+
+  // Check readonly/ended status before entering
+  checkEventStatusThenEnter();
+}
+
+async function checkEventStatusThenEnter() {
+  try {
+    const eventSnap = await db.collection('forza_eventos').doc(state.activeEventId).get();
+    const eventData = eventSnap.data() || {};
+    const status    = eventData.status || 'active';
+    const isMaster  = state.profile?.role === 'master_admin';
+
+    // Check if readonly has expired → set ended
+    if (status === 'readonly' && eventData.readonlyUntil) {
+      const until = eventData.readonlyUntil.toDate ? eventData.readonlyUntil.toDate() : new Date(eventData.readonlyUntil);
+      if (new Date() > until) {
+        await db.collection('forza_eventos').doc(state.activeEventId).update({ status: 'ended' });
+        if (!isMaster) { renderEndedScreen(eventData); return; }
+      }
+    }
+
+    if (status === 'ended' && !isMaster) { renderEndedScreen(eventData); return; }
+    if (status === 'readonly' && !isMaster) { renderReadonlyScreen(eventData); return; }
+
+    enterEvent();
+  } catch(e) {
+    console.error('[START]', e);
+    renderLogin('Error al cargar el evento: ' + e.message);
+  }
+}
+
+function enterEvent() {
+  const role    = state.profile?.role;
   const isAdmin = role === 'master_admin' || role === 'admin';
 
-  // Assign initial room
   state.activeRoomId = state.profile?.assignedRoom || null;
-
-  // Start real-time listeners (room resolved once rooms load)
   startListeners(state.activeRoomId || '_placeholder');
-
-  // Determine view mode
-  state.view = 'scanner';
+  state.view    = 'scanner';
   state.appMode = isAdmin ? 'admin' : 'operator';
-
   startAutoCloseTimer();
   rerender();
 }
