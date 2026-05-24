@@ -430,6 +430,14 @@ function geo() {
   }, () => {}, { enableHighAccuracy: true });
 }
 
+// ── Invite code generator ─────────────────────────────────────
+function generateInviteCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no O,0,I,1 — ambiguous chars removed
+  let code = '';
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
 // ── Firestore paths ───────────────────────────────────────────
 const eventDocRef   = () => doc(db, DB_ROOT, 'current_event');
 const roomsColRef   = () => collection(db, DB_ROOT, 'current_event', 'rooms');
@@ -2911,6 +2919,25 @@ function buildGlobalAdmin() {
     </div>`;
   wrap.appendChild(evtBox);
 
+  // Migration tool — master admin only
+  if (isMasterAdmin) {
+    const migDiv = el('div', 'sdiv'); wrap.appendChild(migDiv);
+    const migLabel = el('div', 'sl', 'MIGRACIÓN DE DATOS');
+    wrap.appendChild(migLabel);
+    const migBox = el('div', 'export-box');
+    migBox.innerHTML = `
+      <div style="font-size:13px;font-weight:700;margin-bottom:3px">Migrar evento actual</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Copia todos los datos de <code>current_event</code> a un nuevo evento con ID propio y código de invitación. El path original no se toca hasta que confirmes la eliminación.</div>
+      <button class="btn-sm btn-sm-amber" id="migrate-btn" style="width:100%;padding:9px;margin-bottom:10px">Migrar evento actual</button>
+      <div id="migrate-progress" style="background:var(--surface2);border-radius:var(--r);padding:10px;font-family:monospace;max-height:200px;overflow-y:auto;display:none"></div>
+      <div id="migrate-confirm-delete" style="display:none;margin-top:10px;background:var(--red-bg);border:1px solid var(--red-border);border-radius:var(--r);padding:12px">
+        <div style="font-size:13px;font-weight:700;color:var(--red-text);margin-bottom:6px">⚠️ Migración completa — ¿eliminar el original?</div>
+        <div style="font-size:12px;color:var(--red-text);margin-bottom:10px">Los datos ya están en el nuevo evento. Esta acción borra <code>current_event</code> permanentemente.</div>
+        <button class="btn-sm btn-sm-red" id="migrate-delete-btn" style="width:100%;padding:9px">Eliminar current_event definitivamente</button>
+      </div>`;
+    wrap.appendChild(migBox);
+  }
+
   setTimeout(() => {
     $('save-event-name')?.addEventListener('click', async () => {
       const v = $('event-name-input')?.value.trim();
@@ -2922,6 +2949,15 @@ function buildGlobalAdmin() {
       await setDoc(ref, { name: v, access: buildSeedAccess(), pin: '', createdAt: serverTimestamp() });
     });
     $('create-admin-btn')?.addEventListener('click', () => createAdminAccount());
+    $('migrate-btn')?.addEventListener('click', () => {
+      const progressEl = $('migrate-progress');
+      if (progressEl) progressEl.style.display = 'block';
+      migrateCurrentEvent();
+    });
+    $('migrate-delete-btn')?.addEventListener('click', () => {
+      const newId = $('migrate-confirm-delete')?.dataset.newId;
+      if (newId) deleteCurrentEventAfterMigration(newId);
+    });
   }, 0);
 
   return wrap;
@@ -2973,6 +3009,159 @@ window.deleteRoom = async id => {
 };
 
 window.exportAllCSV = () => state.rooms.forEach(r => exportForzaCSV(r.id));
+
+// ── Migration tool — current_event → forza_eventos/{newId} ───
+async function migrateCurrentEvent() {
+  const eventName = prompt('Nombre para el evento migrado (ej: "Olimpiada Nacional 2026"):');
+  if (!eventName?.trim()) return;
+
+  const progressEl = $('migrate-progress');
+  const log = (msg, isErr = false) => {
+    if (!progressEl) return;
+    const line = el('div', '');
+    line.style.cssText = `font-size:12px;margin-bottom:3px;color:${isErr ? 'var(--red-text)' : 'var(--text2)'}`;
+    line.textContent = msg;
+    progressEl.appendChild(line);
+  };
+
+  const btn = $('migrate-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Migrando…'; }
+  if (progressEl) progressEl.innerHTML = '';
+
+  const srcBase = db.collection('forza_eventos').doc('current_event');
+  const newId   = db.collection('forza_eventos').doc().id;
+  const dstBase = db.collection('forza_eventos').doc(newId);
+
+  try {
+    // 1. Read source event doc
+    log('📄 Leyendo evento actual…');
+    const eventSnap = await srcBase.get();
+    if (!eventSnap.exists) { log('✕ No se encontró forza_eventos/current_event', true); if (btn) { btn.disabled = false; btn.textContent = 'Migrar evento actual'; } return; }
+    const eventData = eventSnap.data();
+
+    // 2. Write new event doc
+    const inviteCode = generateInviteCode();
+    await dstBase.set({
+      ...eventData,
+      name:         eventName.trim(),
+      inviteCode,
+      status:       'active',
+      ownedBy:      state.authUser.uid,
+      admins:       [],
+      createdAt:    firebase.firestore.FieldValue.serverTimestamp(),
+      migratedFrom: 'current_event',
+    });
+    log(`✓ Evento creado → ID: ${newId} · Código: ${inviteCode}`);
+
+    // 3. Read and copy rooms
+    log('🏠 Migrando comedores…');
+    const roomsSnap = await srcBase.collection('rooms').get();
+    log(`  ${roomsSnap.docs.length} comedor(es) encontrado(s)`);
+
+    for (const roomDoc of roomsSnap.docs) {
+      const roomId  = roomDoc.id;
+      const roomDst = dstBase.collection('rooms').doc(roomId);
+      await roomDst.set(roomDoc.data());
+      log(`  ✓ Comedor: ${roomDoc.data().name || roomId}`);
+
+      // 4. Scans — batch in groups of 400 (Firestore limit is 500)
+      const scansSnap = await srcBase.collection('rooms').doc(roomId).collection('scans').get();
+      log(`    📋 ${scansSnap.docs.length} scan(s)…`);
+      const scanBatches = [];
+      let batch = db.batch();
+      let batchCount = 0;
+      for (const scanDoc of scansSnap.docs) {
+        batch.set(roomDst.collection('scans').doc(scanDoc.id), scanDoc.data());
+        batchCount++;
+        if (batchCount === 400) {
+          scanBatches.push(batch);
+          batch = db.batch();
+          batchCount = 0;
+        }
+      }
+      if (batchCount > 0) scanBatches.push(batch);
+      for (const b of scanBatches) await b.commit();
+      log(`    ✓ ${scansSnap.docs.length} scans migrados`);
+
+      // 5. Shifts
+      const shiftsSnap = await srcBase.collection('rooms').doc(roomId).collection('shifts').get();
+      log(`    🕐 ${shiftsSnap.docs.length} turno(s)…`);
+      if (shiftsSnap.docs.length > 0) {
+        const shiftBatch = db.batch();
+        shiftsSnap.docs.forEach(d => shiftBatch.set(roomDst.collection('shifts').doc(d.id), d.data()));
+        await shiftBatch.commit();
+      }
+      log(`    ✓ ${shiftsSnap.docs.length} turnos migrados`);
+    }
+
+    log('');
+    log(`✅ Migración completa. Nuevo ID: ${newId}`);
+    log(`🔑 Invite code: ${inviteCode}`);
+    log('');
+
+    if (btn) { btn.disabled = false; btn.textContent = 'Migrar evento actual'; }
+
+    // 6. Reveal second confirmation block — does NOT auto-delete
+    const confirmDelete = $('migrate-confirm-delete');
+    if (confirmDelete) {
+      confirmDelete.style.display = 'block';
+      confirmDelete.dataset.newId = newId;
+    }
+
+  } catch (e) {
+    log(`✕ Error: ${e.message}`, true);
+    log('⚠️ El path original (current_event) no fue modificado.', true);
+    if (btn) { btn.disabled = false; btn.textContent = 'Reintentar migración'; }
+    console.error('[MIGRATE]', e);
+  }
+}
+
+async function deleteCurrentEventAfterMigration(newId) {
+  if (!confirm(`¿Estás seguro de eliminar forza_eventos/current_event?\n\nLos datos ya están en el nuevo evento (${newId}).\n\nEsta acción NO se puede deshacer.`)) return;
+
+  const progressEl = $('migrate-progress');
+  const log = (msg, isErr = false) => {
+    if (!progressEl) return;
+    const line = el('div', '');
+    line.style.cssText = `font-size:12px;margin-bottom:3px;color:${isErr ? 'var(--red-text)' : 'var(--text2)'}`;
+    line.textContent = msg;
+    progressEl.appendChild(line);
+  };
+
+  const delBtn = $('migrate-delete-btn');
+  if (delBtn) { delBtn.disabled = true; delBtn.textContent = 'Eliminando…'; }
+
+  try {
+    const srcBase = db.collection('forza_eventos').doc('current_event');
+    const roomsSnap = await srcBase.collection('rooms').get();
+
+    for (const roomDoc of roomsSnap.docs) {
+      const roomId     = roomDoc.id;
+      const scansSnap  = await srcBase.collection('rooms').doc(roomId).collection('scans').get();
+      const shiftsSnap = await srcBase.collection('rooms').doc(roomId).collection('shifts').get();
+      // Delete in batches of 400
+      const allRefs = [...scansSnap.docs.map(d => d.ref), ...shiftsSnap.docs.map(d => d.ref)];
+      while (allRefs.length > 0) {
+        const chunk = allRefs.splice(0, 400);
+        const b = db.batch();
+        chunk.forEach(ref => b.delete(ref));
+        await b.commit();
+      }
+      await srcBase.collection('rooms').doc(roomId).delete();
+      log(`  ✓ Comedor eliminado: ${roomDoc.data().name || roomId}`);
+    }
+
+    await srcBase.delete();
+    log('✅ current_event eliminado correctamente.');
+
+    const confirmDelete = $('migrate-confirm-delete');
+    if (confirmDelete) confirmDelete.style.display = 'none';
+  } catch (e) {
+    log(`✕ Error al eliminar: ${e.message}`, true);
+    if (delBtn) { delBtn.disabled = false; delBtn.textContent = 'Reintentar eliminación'; }
+    console.error('[MIGRATE DELETE]', e);
+  }
+}
 
 window.newEvent = async () => {
   if (!confirm('¿Exportar todos los registros e iniciar un evento nuevo? Esto borrará todos los datos actuales.')) return;
