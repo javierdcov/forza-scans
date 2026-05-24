@@ -476,19 +476,34 @@ auth.onAuthStateChanged(async user => {
       // If enrollment is in progress, doEnroll will call startApp() after writing
       // the profile — do nothing here to avoid the race condition.
       if (state._enrolling) return;
-      // Retry once after 3s in case of a write delay
-      setTimeout(async () => {
-        const retry = await db.collection('forza_users').doc(user.uid).get();
-        if (retry.exists) {
-          state.profile = retry.data();
-          startApp();
-        } else {
-          // Genuinely no profile — only a real first-time master admin reaches here
-          renderFirstSetup();
+      // Retry once after 3s in case of a write delay.
+      // Store the timer so we can cancel it if the user is deleted (e.g. bad invite code).
+      if (state._profileRetryTimer) clearTimeout(state._profileRetryTimer);
+      state._profileRetryTimer = setTimeout(async () => {
+        state._profileRetryTimer = null;
+        // Guard: user may have been deleted (failed enrollment) before timer fires
+        if (!state.authUser) return;
+        try {
+          const retry = await db.collection('forza_users').doc(user.uid).get();
+          if (retry.exists) {
+            state.profile = retry.data();
+            startApp();
+          } else {
+            // Genuinely no profile — only a real first-time master admin reaches here
+            renderFirstSetup();
+          }
+        } catch(e) {
+          // User was deleted or lost auth — just show login
+          renderLogin();
         }
       }, 3000);
     }
   } else {
+    // Cancel any pending profile retry before clearing state
+    if (state._profileRetryTimer) {
+      clearTimeout(state._profileRetryTimer);
+      state._profileRetryTimer = null;
+    }
     state.authUser      = null;
     state.profile       = null;
     state.activeEventId = null;
