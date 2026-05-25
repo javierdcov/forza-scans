@@ -3435,19 +3435,14 @@ function renderLogin(errorMsg) {
 
     let cred = null;
     try {
-      console.log('[doEnroll] step 1: creating auth account for', email);
       state._enrolling = true;
       cred = await auth.createUserWithEmailAndPassword(email, OPERATOR_PASSWORD);
-      console.log('[doEnroll] step 2: auth account created, uid =', cred.user.uid);
 
-      console.log('[doEnroll] step 3: querying forza_eventos for inviteCode =', code);
       const evSnap = await db.collection('forza_eventos')
         .where('inviteCode', '==', code)
         .get();
-      console.log('[doEnroll] step 4: query done, empty =', evSnap.empty, 'count =', evSnap.size);
 
       if (evSnap.empty) {
-        console.log('[doEnroll] invalid code — deleting auth account');
         await cred.user.delete();
         state._enrolling = false;
         if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Código de invitación inválido.'; }
@@ -3456,8 +3451,6 @@ function renderLogin(errorMsg) {
 
       const evDoc  = evSnap.docs[0];
       const status = evDoc.data().status || 'active';
-      console.log('[doEnroll] step 5: event found, id =', evDoc.id, 'status =', status);
-
       if (status === 'ended' || status === 'readonly') {
         await cred.user.delete();
         state._enrolling = false;
@@ -3466,7 +3459,6 @@ function renderLogin(errorMsg) {
       }
 
       const matchedEventId = evDoc.id;
-      console.log('[doEnroll] step 6: writing forza_users profile for uid =', cred.user.uid);
       await db.collection('forza_users').doc(cred.user.uid).set({
         email,
         name:          `${first} ${last}`,
@@ -3478,7 +3470,6 @@ function renderLogin(errorMsg) {
         inviteCode:    code,
         createdAt:     firebase.firestore.FieldValue.serverTimestamp(),
       });
-      console.log('[doEnroll] step 7: profile written successfully — calling startApp()');
 
       state._enrolling = false;
       state.profile = {
@@ -3488,11 +3479,9 @@ function renderLogin(errorMsg) {
       startApp();
 
     } catch (e) {
-      console.error('[doEnroll] CAUGHT ERROR at step unknown:', e.code, e.message, e);
       state._enrolling = false;
       if (cred?.user) {
-        console.log('[doEnroll] cleaning up auth account after error');
-        try { await cred.user.delete(); } catch(del) { console.error('[doEnroll] delete also failed:', del.message); }
+        try { await cred.user.delete(); } catch(_) {}
       }
       if (errEl) {
         errEl.style.display = 'block';
