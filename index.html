@@ -2124,7 +2124,7 @@ async function refreshOperatorList(container) {
     const snap = await getDocs(usersColRef());
     const operators = snap.docs
       .map(d => ({ uid: d.id, ...d.data() }))
-      .filter(u => u.role === 'operator')
+      .filter(u => u.role === 'operator' && u.assignedEvent === state.activeEventId)
       .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
     if (operators.length === 0) {
@@ -3597,6 +3597,25 @@ function renderLogin(errorMsg) {
 
 // ── First setup (master admin profile creation) ───────────────
 function renderFirstSetup() {
+  // Guard: re-read Firestore before showing this screen.
+  // The 3-second retry timer in onAuthStateChanged can race with doEnroll,
+  // causing a legitimate operator to reach here and create a spurious event
+  // with role master_admin. If a profile already exists, just start the app.
+  if (state.authUser) {
+    db.collection('forza_users').doc(state.authUser.uid).get().then(snap => {
+      if (snap.exists) {
+        state.profile = snap.data();
+        startApp();
+      } else {
+        _renderFirstSetupForm();
+      }
+    }).catch(() => _renderFirstSetupForm());
+    return;
+  }
+  _renderFirstSetupForm();
+}
+
+function _renderFirstSetupForm() {
   const root = $('root');
   if (!root) return;
   root.innerHTML = `
