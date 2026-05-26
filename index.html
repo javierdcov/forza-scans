@@ -424,14 +424,20 @@ const el = (tag, cls, html) => {
   if (html !== undefined) e.innerHTML = html;
   return e;
 };
-const today = () => {
+const today = (tz) => {
   const d = new Date();
+  if (tz) {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d);
+    const p = {};
+    parts.forEach(x => { p[x.type] = x.value; });
+    return `${p.year}-${p.month}-${p.day}`;
+  }
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 };
-const timeNow = () => new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const timeNow = (tz) => new Date().toLocaleTimeString('es-MX', { timeZone: tz || undefined, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const dateTimeNow = () => new Date().toLocaleString('es-MX', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 function geo() {
@@ -553,10 +559,11 @@ function startListeners(roomId) {
   }
 
   const roomBase = base.collection('rooms').doc(roomId);
+  const roomTz = state.rooms.find(r => r.id === roomId)?.timezone || null;
 
   // Scans for active room — always today (for scanner/duplicate detection)
   const u3 = roomBase.collection('scans')
-    .where('day', '==', today())
+    .where('day', '==', today(roomTz))
     .onSnapshot(snap => {
       state.scans = snap.docs.map(d => ({ id: d.id, ...d.data() }))
         .sort((a, b) => (b.ts?.seconds || 0) - (a.ts?.seconds || 0));
@@ -564,7 +571,7 @@ function startListeners(roomId) {
     });
 
   // Shifts for active room — uses shiftsDate (may be a past date when browsing)
-  const shiftsDay = state.shiftsDate || today();
+  const shiftsDay = state.shiftsDate || today(roomTz);
   state.shiftsReady = false; // reset — listener not yet returned data
   const u4 = roomBase.collection('shifts')
     .where('day', '==', shiftsDay)
@@ -627,14 +634,15 @@ function getOpenShift() {
 async function writeScan(parsed, result, type = 'scan') {
   const room = state.rooms.find(r => r.id === state.activeRoomId);
   if (!room) return;
+  const tz = room.timezone || null;
   const openShift = getOpenShift();
   const scanRef = doc(scansColRef(state.activeRoomId));
   await setDoc(scanRef, {
     parsed, result, type,
     shiftId:   openShift?.id || null,
     shiftName: openShift?.name || 'Sin turno',
-    day:       today(),
-    time:      timeNow(),
+    day:       today(tz),
+    time:      timeNow(tz),
     ts:        serverTimestamp(),
     geo:       state.geo || null,
     roomId:    state.activeRoomId,
@@ -1034,7 +1042,7 @@ function buildShiftsTab(room) {
     return wrap;
   }
 
-  const todayStr    = today();
+  const todayStr    = today(room.timezone || undefined);
   const selectedDay = state.shiftsDate || todayStr;
   const isToday     = selectedDay === todayStr;
 
@@ -1076,6 +1084,14 @@ function buildShiftsTab(room) {
   const pills = el('div', 'shift-pills');
   pills.style.marginBottom = '12px';
 
+  // Block shift open if room has no timezone configured
+  const noTimezone = isToday && !room.timezone;
+  if (noTimezone) {
+    const tzWarn = el('div', 'ibar ibar-a');
+    tzWarn.innerHTML = '⚠️ <strong>Configura la zona horaria de este comedor</strong> antes de abrir un turno. Ve a la pestaña <strong>Comedor → Zona horaria</strong>.';
+    wrap.appendChild(tzWarn);
+  }
+
   SHIFTS.forEach(def => {
     const sh = todayShifts.find(s => s.shiftKey === def.id);
     const pill = el('div', 'shift-pill');
@@ -1089,7 +1105,7 @@ function buildShiftsTab(room) {
     if (isToday) {
       const btn = el('button', `shift-btn shift-btn-${status}`);
       btn.textContent = status === 'pending' ? 'Abrir' : status === 'open' ? 'Cerrar' : '✓';
-      btn.disabled = status === 'closed';
+      btn.disabled = status === 'closed' || (noTimezone && status === 'pending');
       btn.onclick = () => status === 'pending' ? openShiftModal(def, sh, room) : closeShiftModal(sh, room);
       pill.appendChild(btn);
     } else {
@@ -1263,6 +1279,7 @@ function openShiftModal(def, existing, room) {
         const roomId      = state.activeRoomId;
         const room2       = state.rooms.find(r => r.id === roomId);
         if (!room2) { console.error('No room found'); return; }
+        const tz2 = room2.timezone || null;
         closeModal();
         try {
           const newShiftRef = db
@@ -1272,8 +1289,8 @@ function openShiftModal(def, existing, room) {
           await newShiftRef.set({
             shiftKey: def.id, name: def.name, emoji: def.emoji,
             start: startVal, end: endVal, expectedCount: expectedVal,
-            status: 'open', openedAt: timeNow(), closedAt: null,
-            scanCount: 0, day: today(), location: state.geo || null,
+            status: 'open', openedAt: timeNow(tz2), closedAt: null,
+            scanCount: 0, day: today(tz2), location: state.geo || null,
           });
           console.log('[SHIFT] Opened:', def.name);
         } catch(e) {
@@ -1368,16 +1385,19 @@ window.updateNSCount = (present) => {
 };
 
 window.confirmCloseShift = async (shiftId) => {
+  const room = state.rooms.find(r => r.id === state.activeRoomId);
+  const tz = room?.timezone || null;
+
   const checked = Array.from(document.querySelectorAll('.ns-check:checked')).map(c => ({
     parsed: { name: '(Perfil elegible)', code: '', state: c.dataset.state, sport: c.dataset.sport, categories: [c.dataset.cat] },
-    result: { result: 'noshow' }, type: 'noshow', day: today(),
+    result: { result: 'noshow' }, type: 'noshow', day: today(tz),
     shiftId, shiftName: '', time: '—', ts: serverTimestamp(), geo: state.geo || null,
     roomId: state.activeRoomId, roomName: '',
   }));
 
   const manual = manualNSEntries.map(e => ({
     parsed: { name: e.name, code: '', state: e.state, sport: e.sport, categories: e.cat ? [e.cat] : [] },
-    result: { result: 'manual-noshow' }, type: 'manual-noshow', day: today(),
+    result: { result: 'manual-noshow' }, type: 'manual-noshow', day: today(tz),
     shiftId, shiftName: '', time: '—', ts: serverTimestamp(), geo: state.geo || null,
     roomId: state.activeRoomId, roomName: '',
   }));
@@ -1388,7 +1408,7 @@ window.confirmCloseShift = async (shiftId) => {
   // Close the shift doc
   await updateDoc(shiftDocRef(state.activeRoomId, shiftId), {
     status:    'closed',
-    closedAt:  timeNow(),
+    closedAt:  timeNow(tz),
     expectedCount: Number($('expected-adj')?.value || 0),
     location:  state.geo || null,
   });
@@ -2558,6 +2578,79 @@ function buildRoomAdmin(room) {
   const pinRow = el('div', 'mrow', `<input class="minput" id="room-pin-input" type="password" maxlength="6" value="${room?.pin || ''}" placeholder="PIN numérico"/><button class="mbtn" id="save-room-pin">Guardar</button>`);
   wrap.appendChild(pinRow);
 
+  // Timezone
+  const tzDiv0 = el('div', 'sdiv'); wrap.appendChild(tzDiv0);
+  const tzLabel = el('div', 'sl', 'ZONA HORARIA');
+  wrap.appendChild(tzLabel);
+  if (!room.timezone) {
+    const tzWarnBar = el('div', 'ibar ibar-a');
+    tzWarnBar.innerHTML = '⚠️ <strong>Zona horaria no configurada.</strong> Los turnos no se pueden abrir hasta configurarla.';
+    wrap.appendChild(tzWarnBar);
+  }
+  const tzNote = el('div', 'ibar ibar-b', 'Define la zona horaria de este comedor. Los horarios de turnos y scans se registrarán en esta zona.');
+  wrap.appendChild(tzNote);
+  const tzFormLabel = el('div', 'form-label', 'Zona horaria');
+  wrap.appendChild(tzFormLabel);
+
+  const TZ_OPTIONS = [
+    { group: 'México', zones: [
+      ['America/Mexico_City',    'Ciudad de México, Monterrey, Guadalajara (CST/CDT)'],
+      ['America/Tijuana',        'Tijuana, Baja California (PST/PDT)'],
+      ['America/Hermosillo',     'Hermosillo, Sonora (MST, sin horario de verano)'],
+      ['America/Chihuahua',      'Chihuahua, Mazatlán (MST/MDT)'],
+      ['America/Cancun',         'Cancún, Quintana Roo (EST, sin horario de verano)'],
+    ]},
+    { group: 'Estados Unidos', zones: [
+      ['America/New_York',       'Nueva York, Miami (EST/EDT)'],
+      ['America/Chicago',        'Chicago, Dallas (CST/CDT)'],
+      ['America/Denver',         'Denver, Phoenix (MST/MDT)'],
+      ['America/Los_Angeles',    'Los Ángeles, Las Vegas (PST/PDT)'],
+    ]},
+    { group: 'Centroamérica y Caribe', zones: [
+      ['America/Guatemala',      'Guatemala (CST)'],
+      ['America/El_Salvador',    'El Salvador (CST)'],
+      ['America/Tegucigalpa',    'Honduras (CST)'],
+      ['America/Managua',        'Nicaragua (CST)'],
+      ['America/Costa_Rica',     'Costa Rica (CST)'],
+      ['America/Panama',         'Panamá (EST)'],
+      ['America/Bogota',         'Colombia (COT)'],
+      ['America/Lima',           'Perú (PET)'],
+      ['America/Santiago',       'Chile (CLT/CLST)'],
+      ['America/Argentina/Buenos_Aires', 'Argentina (ART)'],
+      ['America/Sao_Paulo',      'Brasil — São Paulo (BRT/BRST)'],
+      ['America/Caracas',        'Venezuela (VET)'],
+    ]},
+    { group: 'Europa', zones: [
+      ['Europe/Madrid',          'España — Madrid (CET/CEST)'],
+      ['Europe/London',          'Reino Unido (GMT/BST)'],
+    ]},
+    { group: 'Otras regiones', zones: [
+      ['UTC',                    'UTC (Tiempo Universal Coordinado)'],
+      ['Pacific/Honolulu',       'Hawaii (HST)'],
+      ['America/Anchorage',      'Alaska (AKST/AKDT)'],
+      ['Asia/Tokyo',             'Japón (JST)'],
+      ['Asia/Shanghai',          'China (CST)'],
+      ['Europe/Paris',           'Francia, Alemania (CET/CEST)'],
+    ]},
+  ];
+
+  const tzOptHtml = TZ_OPTIONS.map(g =>
+    `<optgroup label="${g.group}">${g.zones.map(([val, label]) =>
+      `<option value="${val}" ${room.timezone === val ? 'selected' : ''}>${label}</option>`
+    ).join('')}</optgroup>`
+  ).join('');
+
+  const tzRow = el('div', 'mrow');
+  tzRow.innerHTML = `<select class="minput" id="room-tz-select" style="flex:1">${tzOptHtml}</select><button class="mbtn" id="save-room-tz">Guardar</button>`;
+  wrap.appendChild(tzRow);
+
+  if (room.timezone) {
+    const tzCurrent = el('div', '');
+    tzCurrent.style.cssText = 'font-size:11px;color:var(--text3);margin-bottom:4px;margin-top:-4px';
+    tzCurrent.textContent = `Zona actual: ${room.timezone}`;
+    wrap.appendChild(tzCurrent);
+  }
+
   // Shift configuration
   const shiftDiv0 = el('div', 'sdiv'); wrap.appendChild(shiftDiv0);
   const shiftConfigLabel = el('div', 'sl', 'TURNOS ACTIVOS EN ESTE COMEDOR');
@@ -2660,6 +2753,13 @@ function buildRoomAdmin(room) {
       const v = $('room-pin-input')?.value.trim();
       await updateDoc(roomDocRef(room.id), { pin: v });
       alert('PIN guardado.');
+    });
+    $('save-room-tz')?.addEventListener('click', async () => {
+      const v = $('room-tz-select')?.value;
+      if (!v) return;
+      await updateDoc(roomDocRef(room.id), { timezone: v });
+      const btn = $('save-room-tz');
+      if (btn) { btn.textContent = '✓'; setTimeout(() => { btn.textContent = 'Guardar'; }, 1500); }
     });
 
     // Drive import button
@@ -3718,8 +3818,26 @@ function renderEndedScreen(eventData) {
 
 // ── Auto-close shift ─────────────────────────────────────────
 // Parses "HH:MM" into today's Date object, optionally offset by minutes
-function shiftTimeToDate(hhmm, day, offsetMinutes = 0) {
+function shiftTimeToDate(hhmm, day, offsetMinutes = 0, tz) {
   if (!hhmm || !day) return null;
+  if (tz) {
+    // Offset-correction: construct a UTC epoch that represents HH:MM wall-clock time in `tz`.
+    // Step 1 — treat the naive string as UTC to get an initial epoch guess.
+    const utcGuess = new Date(`${day}T${hhmm}:00Z`);
+    // Step 2 — ask Intl what wall-clock time that UTC epoch shows in the target zone.
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+    const zonedStr = fmt.format(utcGuess).replace(',', ''); // "YYYY-MM-DD HH:MM:SS"
+    const zonedDate = new Date(zonedStr + 'Z'); // parse as UTC for arithmetic
+    // Step 3 — the difference tells us the zone offset at that moment.
+    const offsetMs = utcGuess - zonedDate;
+    const dt = new Date(utcGuess.getTime() + offsetMs);
+    dt.setMinutes(dt.getMinutes() + offsetMinutes);
+    return dt;
+  }
+  // Fallback: device local time (no timezone configured)
   const [h, m] = hhmm.split(':').map(Number);
   const [y, mo, d] = day.split('-').map(Number);
   const dt = new Date(y, mo - 1, d, h, m, 0, 0);
@@ -3732,14 +3850,17 @@ async function autoCloseShiftIfNeeded() {
   const openShift = state.shifts.find(s => s.status === 'open');
   if (!openShift) return;
 
+  const room = state.rooms.find(r => r.id === state.activeRoomId);
+  const tz = room?.timezone || null;
+
   const now = new Date();
-  const nowDay = today(); // local date string
+  const nowDay = today(tz); // date in room's timezone
 
   // Trigger 1: day has changed since the shift was opened
   const dayChanged = openShift.day && openShift.day !== nowDay;
 
-  // Trigger 2: current time is >= end time + 60 minutes
-  const autoCloseTime = shiftTimeToDate(openShift.end, openShift.day, 60);
+  // Trigger 2: current time is >= end time + 60 minutes (in room's timezone)
+  const autoCloseTime = shiftTimeToDate(openShift.end, openShift.day, 60, tz);
   const pastAutoClose = autoCloseTime && now >= autoCloseTime;
 
   if (!dayChanged && !pastAutoClose) return;
@@ -3750,7 +3871,7 @@ async function autoCloseShiftIfNeeded() {
   try {
     await updateDoc(shiftDocRef(state.activeRoomId, openShift.id), {
       status:           'closed',
-      closedAt:         timeNow(),
+      closedAt:         timeNow(tz),
       autoClosedReason: reason,
       location:         state.geo || null,
     });
