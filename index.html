@@ -414,6 +414,8 @@ let state = {
   googleToken:   null,   // OAuth access token for Google APIs
   googleTokenExpiry: 0,  // timestamp when token expires
   shiftsReady:   false,  // true after first shifts snapshot returns — prevents false block on page reload
+  openSportBodies: new Set(), // sport names whose accordion body is open
+  openStateBodies: new Set(), // "sport||state" keys whose accordion body is open
 };
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -597,7 +599,7 @@ function checkAccess(parsed, access) {
   if (parsed.sport === 'Sin Servicio') return { result: 'denied', reason: 'Sin Servicio — no autorizado', missing: [] };
   const sA = access?.[parsed.sport];
   if (!sA) return { result: 'pending', reason: `Deporte no registrado: "${parsed.sport}"`, missing: ['sport'] };
-  if (!sA.enabled) return { result: 'denied', reason: `${parsed.sport} no activo en este comedor`, missing: [] };
+  // Sport-level `enabled` is a cascade convenience only — access is gated by state + category.
   const stA = sA.states?.[parsed.state];
   if (!stA) return { result: 'pending', reason: `Delegación no registrada: "${parsed.state}"`, missing: ['state'] };
   if (!stA.enabled) return { result: 'denied', reason: `${parsed.state} no tiene acceso hoy`, missing: [] };
@@ -2859,17 +2861,32 @@ function buildRoomAdmin(room) {
 
 function buildSportBlock(room, sport, sObj) {
   const block = el('div', 'sb');
-  const status = Object.values(sObj.states || {}).every(s => s.enabled && Object.values(s.cats || {}).every(c => c.enabled)) ? 'on' : sObj.enabled ? 'partial' : 'off';
+
+  // Badge reflects children state, not sObj.enabled
+  const stateVals = Object.values(sObj.states || {});
+  let sportStatus;
+  if (stateVals.length === 0) {
+    sportStatus = sObj.enabled ? 'on' : 'off';
+  } else {
+    const allOn  = stateVals.every(s => s.enabled && Object.values(s.cats || {}).every(c => c.enabled));
+    const allOff = stateVals.every(s => !s.enabled && Object.values(s.cats || {}).every(c => !c.enabled));
+    sportStatus  = allOn ? 'on' : allOff ? 'off' : 'partial';
+  }
+
   const hdr = el('div', 'sh');
   hdr.innerHTML = `
-    <span class="chev">▼</span>
+    <span class="chev" style="transition:transform .18s">▼</span>
     <span class="sname">${sport}</span>
-    <span class="sbadge ${status === 'on' ? 'bon' : status === 'off' ? 'boff' : 'bpart'}">${status === 'on' ? 'Activo' : status === 'off' ? 'Inactivo' : 'Parcial'}</span>`;
+    <span class="sbadge ${sportStatus === 'on' ? 'bon' : sportStatus === 'off' ? 'boff' : 'bpart'}">${sportStatus === 'on' ? 'Activo' : sportStatus === 'off' ? 'Inactivo' : 'Parcial'}</span>`;
 
+  // Master toggle — cascades to all states and categories; guards against missing cats
   const sw = buildToggle(sObj.enabled, async val => {
     const newAcc = JSON.parse(JSON.stringify(room.access));
     newAcc[sport].enabled = val;
-    Object.values(newAcc[sport].states).forEach(s => { s.enabled = val; Object.values(s.cats).forEach(c => c.enabled = val); });
+    Object.values(newAcc[sport].states || {}).forEach(s => {
+      s.enabled = val;
+      Object.values(s.cats || {}).forEach(c => { c.enabled = val; });
+    });
     await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
   });
   hdr.appendChild(sw);
@@ -2884,8 +2901,16 @@ function buildSportBlock(room, sport, sObj) {
   };
   hdr.appendChild(delBtn);
 
-  const body = el('div', 'sbody'); body.style.display = 'none';
-  hdr.onclick = () => { body.style.display = body.style.display === 'none' ? 'block' : 'none'; };
+  const body = el('div', 'sbody');
+  const isOpen = state.openSportBodies.has(sport);
+  body.style.display = isOpen ? 'block' : 'none';
+
+  hdr.onclick = () => {
+    const opening = body.style.display === 'none';
+    body.style.display = opening ? 'block' : 'none';
+    if (opening) state.openSportBodies.add(sport);
+    else          state.openSportBodies.delete(sport);
+  };
 
   Object.entries(sObj.states || {}).forEach(([state2, stObj]) => {
     body.appendChild(buildStateBlock(room, sport, state2, stObj));
@@ -2894,7 +2919,8 @@ function buildSportBlock(room, sport, sObj) {
   // Add state row
   const addStRow = el('div', 'add-il-st');
   addStRow.innerHTML = '<input class="add-input" placeholder="Nuevo estado…"/><button class="add-go">+</button>';
-  addStRow.querySelector('button').onclick = async () => {
+  addStRow.querySelector('button').onclick = async e => {
+    e.stopPropagation();
     const v = addStRow.querySelector('input').value.trim(); if (!v) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     if (!newAcc[sport].states[v]) newAcc[sport].states[v] = { enabled: true, cats: {} };
@@ -2907,15 +2933,33 @@ function buildSportBlock(room, sport, sObj) {
 
 function buildStateBlock(room, sport, state2, stObj) {
   const block = el('div', 'stblk');
+
+  // Badge reflects category children state
+  const catVals = Object.values(stObj.cats || {});
+  let stateStatus;
+  if (catVals.length === 0) {
+    stateStatus = stObj.enabled ? 'on' : 'off';
+  } else {
+    const allOn  = catVals.every(c => c.enabled);
+    const allOff = catVals.every(c => !c.enabled);
+    stateStatus  = allOn ? 'on' : allOff ? 'off' : 'partial';
+  }
+
   const hdr = el('div', 'sth');
-  hdr.innerHTML = `<span class="chev">▼</span><span class="stname">${state2}</span>`;
+  hdr.innerHTML = `
+    <span class="chev" style="font-size:10px;color:var(--text3)">▼</span>
+    <span class="stname">${state2}</span>
+    <span class="sbadge ${stateStatus === 'on' ? 'bon' : stateStatus === 'off' ? 'boff' : 'bpart'}" style="font-size:9px">${stateStatus === 'on' ? 'Activo' : stateStatus === 'off' ? 'Inactivo' : 'Parcial'}</span>`;
+
+  // Master toggle — cascades to all categories; guards against missing cats
   const sw = buildToggle(stObj.enabled, async val => {
     const newAcc = JSON.parse(JSON.stringify(room.access));
     newAcc[sport].states[state2].enabled = val;
-    Object.values(newAcc[sport].states[state2].cats).forEach(c => c.enabled = val);
+    Object.values(newAcc[sport].states[state2].cats || {}).forEach(c => { c.enabled = val; });
     await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
   }, 'sm');
   hdr.appendChild(sw);
+
   const delBtn = el('button', 'del-btn', '✕');
   delBtn.onclick = async e => {
     e.stopPropagation();
@@ -2926,8 +2970,17 @@ function buildStateBlock(room, sport, state2, stObj) {
   };
   hdr.appendChild(delBtn);
 
-  const body = el('div', 'stbody'); body.style.display = 'none';
-  hdr.onclick = () => { body.style.display = body.style.display === 'none' ? 'block' : 'none'; };
+  const stateKey = `${sport}||${state2}`;
+  const body = el('div', 'stbody');
+  const isOpen = state.openStateBodies.has(stateKey);
+  body.style.display = isOpen ? 'block' : 'none';
+
+  hdr.onclick = () => {
+    const opening = body.style.display === 'none';
+    body.style.display = opening ? 'block' : 'none';
+    if (opening) state.openStateBodies.add(stateKey);
+    else          state.openStateBodies.delete(stateKey);
+  };
 
   Object.entries(stObj.cats || {}).forEach(([cat, catObj]) => {
     const row = el('div', 'crow');
@@ -2950,7 +3003,8 @@ function buildStateBlock(room, sport, state2, stObj) {
 
   const addCatRow = el('div', 'add-il');
   addCatRow.innerHTML = '<input class="add-input" placeholder="Nueva categoría…"/><button class="add-go">+</button>';
-  addCatRow.querySelector('button').onclick = async () => {
+  addCatRow.querySelector('button').onclick = async e => {
+    e.stopPropagation();
     const v = addCatRow.querySelector('input').value.trim(); if (!v) return;
     const newAcc = JSON.parse(JSON.stringify(room.access));
     newAcc[sport].states[state2].cats[v] = { enabled: true };
