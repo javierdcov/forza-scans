@@ -482,7 +482,7 @@ auth.onAuthStateChanged(async user => {
       // If enrollment is in progress, doEnroll will call startApp() after writing
       // the profile — do nothing here to avoid the race condition.
       if (state._enrolling) return;
-      // Retry once after 3s in case of a write delay.
+      // Retry once after 3s to absorb any Firestore write delay from doEnroll.
       // Store the timer so we can cancel it if the user is deleted (e.g. bad invite code).
       if (state._profileRetryTimer) clearTimeout(state._profileRetryTimer);
       state._profileRetryTimer = setTimeout(async () => {
@@ -495,11 +495,11 @@ auth.onAuthStateChanged(async user => {
             state.profile = retry.data();
             startApp();
           } else {
-            // Genuinely no profile — only a real first-time master admin reaches here
-            renderFirstSetup();
+            // No profile after retry — account exists in Auth but not in Firestore.
+            // Master admins are seeded directly in Firebase Console; no app path creates them.
+            renderLogin('Sin acceso. Contacta al administrador.');
           }
         } catch(e) {
-          // User was deleted or lost auth — just show login
           renderLogin();
         }
       }, 3000);
@@ -3595,64 +3595,6 @@ function renderLogin(errorMsg) {
   $('enroll-email')?.addEventListener('keydown', e => e.key === 'Enter' && doEnroll());
 }
 
-// ── First setup (master admin profile creation) ───────────────
-function renderFirstSetup() {
-  // Guard: re-read Firestore before showing this screen.
-  // The 3-second retry timer in onAuthStateChanged can race with doEnroll,
-  // causing a legitimate operator to reach here and create a spurious event
-  // with role master_admin. If a profile already exists, just start the app.
-  if (state.authUser) {
-    db.collection('forza_users').doc(state.authUser.uid).get().then(snap => {
-      if (snap.exists) {
-        state.profile = snap.data();
-        startApp();
-      } else {
-        _renderFirstSetupForm();
-      }
-    }).catch(() => _renderFirstSetupForm());
-    return;
-  }
-  _renderFirstSetupForm();
-}
-
-function _renderFirstSetupForm() {
-  const root = $('root');
-  if (!root) return;
-  root.innerHTML = `
-    <div class="startup">
-      <div class="startup-brand">Forza Scans</div>
-      <div class="startup-title">Configuración inicial</div>
-      <div class="startup-sub">Primera vez que inicias sesión. Completa tu perfil de administrador maestro.</div>
-      <label class="form-label" style="align-self:flex-start;margin-top:8px">Tu nombre</label>
-      <input class="minput" id="setup-name" placeholder="Nombre completo" style="width:100%;margin-bottom:16px"/>
-      <div id="setup-err" class="ibar ibar-r" style="display:none;margin-bottom:10px"></div>
-      <button class="startup-go" id="setup-btn">Completar configuración</button>
-    </div>`;
-  $('setup-btn')?.addEventListener('click', async () => {
-    const name = $('setup-name')?.value.trim();
-    if (!name) return;
-    try {
-      await db.collection('forza_users').doc(state.authUser.uid).set({
-        email: state.authUser.email, name, role: 'master_admin', createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      });
-      // Create default event + first room
-      const newEventRef = db.collection('forza_eventos').doc();
-      state.activeEventId = newEventRef.id;
-      await newEventRef.set({
-        name: 'Olimpiada Nacional 2026', status: 'active', appEnabled: true,
-        inviteCode: generateInviteCode(), ownedBy: state.authUser.uid,
-        admins: [], createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-        readonlyUntil: null, sheetId: null, sheetName: null,
-      });
-      await newEventRef.collection('rooms').doc().set({ name: 'Comedor Principal', access: buildSeedAccess(), pin: '', createdAt: firebase.firestore.FieldValue.serverTimestamp() });
-      state.profile = { role: 'master_admin', name };
-      startApp();
-    } catch (e) {
-      const errEl = $('setup-err');
-      if (errEl) { errEl.style.display = 'block'; errEl.textContent = e.message; }
-    }
-  });
-}
 
 // ── Event dashboard (master admin only) ──────────────────────
 async function renderEventDashboard() {
