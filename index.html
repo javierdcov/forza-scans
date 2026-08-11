@@ -379,7 +379,7 @@ const firebaseConfig = {
   appId:             "1:212292380447:web:d8dd6316dd52f00cd2322a"
 };
 const DB_ROOT = "forza_eventos";
-const OPERATOR_PASSWORD = "Fz#9mK$vX2@nQ8pL";
+
 
 // ── Google API constants ──────────────────────────────────────
 const GOOGLE_CLIENT_ID = '212292380447-56t1rfshef2iqasnhcr312jdebi7hfmb.apps.googleusercontent.com';
@@ -2122,27 +2122,39 @@ async function buildOperatorsTab() {
 
 async function refreshOperatorList(container) {
   container.innerHTML = '<div class="lempty">Cargando…</div>';
+  const isMasterAdmin = state.profile?.role === 'master_admin';
   try {
     const snap = await getDocs(usersColRef());
-    const operators = snap.docs
+    const users = snap.docs
       .map(d => ({ uid: d.id, ...d.data() }))
-      .filter(u => u.role === 'operator' && u.assignedEvent === state.activeEventId)
+      .filter(u => {
+        if (!u.assignedEvent || u.assignedEvent !== state.activeEventId) return false;
+        if (isMasterAdmin) return u.role === 'operator' || u.role === 'admin';
+        return u.role === 'operator';
+      })
       .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
-    if (operators.length === 0) {
-      container.innerHTML = '<div class="lempty">No hay operadores registrados aún.</div>';
+    if (users.length === 0) {
+      container.innerHTML = '<div class="lempty">No hay usuarios registrados aún.</div>';
       return;
     }
 
     container.innerHTML = '';
-    operators.forEach(op => {
+    users.forEach(op => {
       const assignedRoom = state.rooms.find(r => r.id === op.assignedRoom);
-      const isDisabled = op.disabled === true;
+      const isDisabled   = op.disabled === true;
+      const isAdmin      = op.role === 'admin';
+      const dotColor     = isDisabled ? 'var(--red-border)' : isAdmin ? 'var(--blue)' : 'var(--amber)';
+      const roleBadge    = isAdmin
+        ? `<span style="font-size:10px;font-weight:700;color:var(--blue);background:var(--blue-bg);padding:1px 6px;border-radius:4px;margin-left:6px">ADMIN</span>`
+        : '';
       const li = el('div', 'li tappable');
       li.innerHTML = `
-        <div class="ld" style="background:${isDisabled ? 'var(--red-border)' : 'var(--amber)'}"></div>
+        <div class="ld" style="background:${dotColor}"></div>
         <div style="flex:1;min-width:0">
-          <div class="ln" style="${isDisabled ? 'color:var(--text3);text-decoration:line-through' : ''}">${op.name || op.email}</div>
+          <div class="ln" style="${isDisabled ? 'color:var(--text3);text-decoration:line-through' : ''}">
+            ${op.name || op.email}${roleBadge}
+          </div>
           <div class="lm">${op.email}${isDisabled ? ' · <span style="color:var(--red-text);font-weight:700">Desactivado</span>' : ''}</div>
         </div>
         <div class="ltime" style="text-align:right">
@@ -2153,22 +2165,29 @@ async function refreshOperatorList(container) {
       container.appendChild(li);
     });
   } catch (e) {
-    container.innerHTML = `<div class="lempty" style="color:var(--red-text)">Error al cargar operadores.</div>`;
+    container.innerHTML = `<div class="lempty" style="color:var(--red-text)">Error al cargar usuarios.</div>`;
     console.error('[OPS]', e);
   }
 }
 
 function showOperatorModal(op, listContainer) {
-  const assignedRoom = state.rooms.find(r => r.id === op.assignedRoom);
-  const roomOptions  = state.rooms.map(r =>
+  const assignedRoom  = state.rooms.find(r => r.id === op.assignedRoom);
+  const roomOptions   = state.rooms.map(r =>
     `<option value="${r.id}" ${r.id === op.assignedRoom ? 'selected' : ''}>${r.name}</option>`
   ).join('');
   const isDisabled    = op.disabled === true;
+  const isAdmin       = op.role === 'admin';
   const isMasterAdmin = state.profile?.role === 'master_admin';
+  const viewerIsAdmin = state.profile?.role === 'admin' || isMasterAdmin;
 
   showModal(`
     <div class="modal-title">${op.name || op.email}</div>
-    <div class="modal-sub">${op.email}<br>Comedor actual: <strong>${assignedRoom ? assignedRoom.name : 'Sin asignar'}</strong><br>Estado: <strong style="color:${isDisabled ? 'var(--red-text)' : 'var(--green-text)'}">${isDisabled ? 'Desactivado' : 'Activo'}</strong></div>
+    <div class="modal-sub">
+      ${op.email}<br>
+      Rol: <strong>${isAdmin ? 'Administrador' : 'Operador'}</strong><br>
+      Comedor actual: <strong>${assignedRoom ? assignedRoom.name : 'Sin asignar'}</strong><br>
+      Estado: <strong style="color:${isDisabled ? 'var(--red-text)' : 'var(--green-text)'}">${isDisabled ? 'Desactivado' : 'Activo'}</strong>
+    </div>
     <label class="form-label">Asignar comedor</label>
     <select id="op-room-select" style="width:100%;padding:8px 10px;border:0.5px solid var(--border2);border-radius:var(--r);font-size:13px;margin-bottom:18px;background:var(--surface);color:var(--text)">
       <option value="">— Sin comedor —</option>
@@ -2178,10 +2197,13 @@ function showOperatorModal(op, listContainer) {
       <button class="btn-sm btn-sm-ghost" data-action="cancel" style="flex:1;padding:9px">Cancelar</button>
       <button class="btn-sm btn-sm-blue" data-action="save-room" style="flex:1;padding:9px">Guardar</button>
     </div>
-    ${isMasterAdmin ? `
+    ${viewerIsAdmin ? `
     <div style="height:0.5px;background:var(--border);margin:4px 0 12px"></div>
-    <button class="btn-sm ${isDisabled ? 'btn-sm-green' : 'btn-sm-amber'}" data-action="toggle-disabled" style="width:100%;padding:9px;margin-bottom:8px">${isDisabled ? '✓ Activar operador' : '⏸ Desactivar operador'}</button>
-    <button class="btn-sm btn-sm-ghost" data-action="delete-op" style="width:100%;padding:9px;color:var(--red-text);border-color:var(--red-border)">🗑 Eliminar operador</button>
+    <button class="btn-sm ${isDisabled ? 'btn-sm-green' : 'btn-sm-amber'}" data-action="toggle-disabled" style="width:100%;padding:9px;margin-bottom:8px">${isDisabled ? '✓ Activar' : '⏸ Desactivar'}</button>
+    ` : ''}
+    ${isMasterAdmin ? `
+    <button class="btn-sm ${isAdmin ? 'btn-sm-amber' : 'btn-sm-blue'}" data-action="toggle-role" style="width:100%;padding:9px;margin-bottom:8px">${isAdmin ? '⬇ Degradar a Operador' : '⬆ Promover a Administrador'}</button>
+    <button class="btn-sm btn-sm-ghost" data-action="delete-op" style="width:100%;padding:9px;color:var(--red-text);border-color:var(--red-border)">🗑 Eliminar</button>
     ` : ''}`,
     {
       'cancel': () => closeModal(),
@@ -2207,11 +2229,37 @@ function showOperatorModal(op, listContainer) {
         }
       },
 
+      'toggle-role': () => {
+        const newRole    = isAdmin ? 'operator' : 'admin';
+        const newRoleStr = isAdmin ? 'Operador' : 'Administrador';
+        closeModal();
+        showModal(`
+          <div class="modal-title">${isAdmin ? 'Degradar a Operador' : 'Promover a Administrador'}</div>
+          <div class="modal-sub">¿Cambiar el rol de <strong>${op.name || op.email}</strong> a <strong>${newRoleStr}</strong>?</div>
+          <div style="display:flex;gap:8px;margin-top:4px">
+            <button class="btn-sm btn-sm-ghost" data-action="cancel" style="flex:1;padding:10px">Cancelar</button>
+            <button class="btn-sm ${isAdmin ? 'btn-sm-amber' : 'btn-sm-blue'}" data-action="confirm-role" style="flex:1;padding:10px">Confirmar</button>
+          </div>`,
+          {
+            'cancel': () => closeModal(),
+            'confirm-role': async () => {
+              closeModal();
+              try {
+                await updateDoc(userDocRef(op.uid), { role: newRole });
+                await refreshOperatorList(listContainer);
+              } catch (e) {
+                alert('Error al cambiar rol: ' + e.message);
+              }
+            }
+          }
+        );
+      },
+
       'delete-op': () => {
         closeModal();
         showModal(`
-          <div class="modal-title">Eliminar operador</div>
-          <div class="modal-sub">¿Eliminar a <strong>${op.name || op.email}</strong>?<br>Esta acción no se puede deshacer.</div>
+          <div class="modal-title">Eliminar usuario</div>
+          <div class="modal-sub">¿Eliminar a <strong>${op.name || op.email}</strong>?<br>Esta acción no se puede deshacer.<br><span style="color:var(--text3);font-size:12px">Recuerda eliminar también la cuenta en Firebase Console.</span></div>
           <div style="display:flex;gap:8px;margin-top:4px">
             <button class="btn-sm btn-sm-ghost" data-action="cancel" style="flex:1;padding:10px">Cancelar</button>
             <button class="btn-sm btn-sm-red" data-action="confirm-delete-op" style="flex:1;padding:10px">Eliminar</button>
@@ -3091,45 +3139,12 @@ function buildGlobalAdmin() {
 
   const div2 = el('div', 'sdiv'); wrap.appendChild(div2);
 
-  // Admin accounts management — master admin only
+  // Admin accounts info — master admin only
   if (isMasterAdmin) {
     const admLabel = el('div', 'sl', 'CUENTAS DE ADMINISTRADOR');
     wrap.appendChild(admLabel);
-    const admNote = el('div', 'ibar ibar-b', 'Como administrador maestro puedes crear y eliminar cuentas de otros administradores.');
+    const admNote = el('div', 'ibar ibar-b', 'Las cuentas de administrador se crean directamente en Firebase Console. Para promover un operador existente a administrador, ve a la pestaña de Operadores.');
     wrap.appendChild(admNote);
-
-    const addAdminBlock = el('div', 'add-admin-block');
-    // Build event options for dropdown — load async after render
-    addAdminBlock.innerHTML = `
-      <input class="minput" id="new-admin-email" type="email" placeholder="Email del nuevo admin" style="width:100%;margin-bottom:6px"/>
-      <div class="mrow">
-        <input class="minput" id="new-admin-pass" type="password" placeholder="Contraseña temporal"/>
-        <input class="minput" id="new-admin-name" placeholder="Nombre"/>
-      </div>
-      <select class="minput" id="new-admin-event" style="width:100%;margin-bottom:6px">
-        <option value="${state.activeEventId}">${state.event?.name || state.activeEventId} (actual)</option>
-      </select>
-      <button class="btn-sm btn-sm-blue" id="create-admin-btn" style="width:100%;padding:9px;margin-bottom:6px">Crear cuenta de admin</button>
-      <div id="admin-msg"></div>`;
-    wrap.appendChild(addAdminBlock);
-
-    // Populate event dropdown async
-    db.collection('forza_eventos').get().then(snap => {
-      const sel = $('new-admin-event');
-      if (!sel) return;
-      sel.innerHTML = '';
-      snap.docs.filter(d => d.data().status !== 'ended').forEach(d => {
-        const opt = document.createElement('option');
-        opt.value = d.id;
-        opt.textContent = d.data().name || d.id;
-        if (d.id === state.activeEventId) opt.selected = true;
-        sel.appendChild(opt);
-      });
-    });
-
-    // List existing admins
-    const adminListWrap = el('div', ''); adminListWrap.id = 'admin-list'; wrap.appendChild(adminListWrap);
-    loadAdminList(adminListWrap);
   }
 
   const div3 = el('div', 'sdiv'); wrap.appendChild(div3);
@@ -3174,7 +3189,7 @@ function buildGlobalAdmin() {
       const ref = doc(roomsColRef());
       await setDoc(ref, { name: v, access: buildSeedAccess(), pin: '', createdAt: serverTimestamp() });
     });
-    $('create-admin-btn')?.addEventListener('click', () => createAdminAccount());
+
     $('migrate-btn')?.addEventListener('click', () => {
       const progressEl = $('migrate-progress');
       if (progressEl) progressEl.style.display = 'block';
@@ -3190,46 +3205,7 @@ function buildGlobalAdmin() {
   return wrap;
 }
 
-async function loadAdminList(container) {
-  try {
-    const snap = await getDocs(usersColRef());
-    const admins = snap.docs.map(d => ({ uid: d.id, ...d.data() })).filter(u => u.role === 'admin' || u.role === 'master_admin');
-    if (admins.length === 0) { container.innerHTML = '<div class="lempty">No hay admins registrados aún.</div>'; return; }
-    container.innerHTML = '<div class="sl" style="margin-top:12px">ADMINS EXISTENTES</div>';
-    admins.forEach(u => {
-      const row = el('div', 'room-mgmt-row');
-      row.innerHTML = `
-        <div style="flex:1"><div style="font-size:13px;font-weight:600">${u.name || u.email}</div><div style="font-size:11px;color:var(--text2)">${u.email} · ${u.role}</div></div>
-        ${u.role !== 'master_admin' ? `<button class="del-btn" onclick="deleteAdmin('${u.uid}')">✕</button>` : '<span style="font-size:10px;color:var(--text3)">Maestro</span>'}`;
-      container.appendChild(row);
-    });
-  } catch (e) { console.error(e); }
-}
 
-async function createAdminAccount() {
-  const email   = $('new-admin-email')?.value.trim();
-  const pass    = $('new-admin-pass')?.value.trim();
-  const name    = $('new-admin-name')?.value.trim();
-  const eventId = $('new-admin-event')?.value.trim() || state.activeEventId;
-  const msg     = $('admin-msg');
-  if (!email || !pass) { if (msg) { msg.className = 'ibar ibar-r'; msg.textContent = 'Email y contraseña requeridos.'; } return; }
-  if (!eventId) { if (msg) { msg.className = 'ibar ibar-r'; msg.textContent = 'Selecciona un evento para asignar al admin.'; } return; }
-  try {
-    const cred = await auth.createUserWithEmailAndPassword(email, pass);
-    await setDoc(userDocRef(cred.user.uid), {
-      email, name: name || email, role: 'admin',
-      assignedEvent: eventId, assignedRoom: null,
-      createdAt: serverTimestamp(),
-    });
-    // Add uid to event admins array
-    await db.collection('forza_eventos').doc(eventId).update({
-      admins: firebase.firestore.FieldValue.arrayUnion(cred.user.uid),
-    });
-    if (msg) { msg.className = 'ibar ibar-g'; msg.textContent = `✓ Cuenta creada para ${email}.`; }
-  } catch (e) {
-    if (msg) { msg.className = 'ibar ibar-r'; msg.textContent = e.message; }
-  }
-}
 
 window.deleteAdmin = async uid => {
   if (!confirm('¿Eliminar esta cuenta de admin?')) return;
@@ -3478,28 +3454,14 @@ function renderLogin(errorMsg) {
       <div class="startup-title">Bienvenido</div>
       ${errorMsg ? `<div class="ibar ibar-r" style="width:100%;max-width:320px;margin-bottom:10px">${errorMsg}</div>` : ''}
 
-      <div id="login-admin-block" class="login-form">
-        <div class="startup-sub" style="margin-bottom:16px">Acceso de administrador</div>
+      <div id="login-main-block" class="login-form">
         <label class="form-label">Correo electrónico</label>
         <input class="minput" id="login-email" type="email" placeholder="tu@correo.com" style="width:100%;margin-bottom:10px"/>
         <label class="form-label">Contraseña</label>
         <input class="minput" id="login-pass" type="password" placeholder="Contraseña" style="width:100%;margin-bottom:16px"/>
         <div id="login-err" class="ibar ibar-r" style="display:none;margin-bottom:10px"></div>
         <button class="startup-go" id="login-btn">Iniciar sesión</button>
-      </div>
-
-      <div style="display:flex;gap:10px;margin-top:18px;width:100%;max-width:320px">
-        <button class="btn btn-ghost" id="show-op-login" style="flex:1;margin:0;font-size:13px">Soy operador</button>
-        <button class="btn btn-ghost" id="show-op-enroll" style="flex:1;margin:0;font-size:13px">Registrarme</button>
-      </div>
-
-      <div id="login-op-block" class="login-form" style="display:none;margin-top:18px">
-        <div class="startup-sub" style="margin-bottom:16px">Inicio de sesión — Operador</div>
-        <label class="form-label">Correo electrónico</label>
-        <input class="minput" id="op-login-email" type="email" placeholder="tu@correo.com" style="width:100%;margin-bottom:16px"/>
-        <div id="op-login-err" class="ibar ibar-r" style="display:none;margin-bottom:10px"></div>
-        <button class="startup-go" id="op-login-btn">Entrar</button>
-        <button class="btn btn-ghost" id="hide-op-login" style="margin-top:8px">Cancelar</button>
+        <button class="btn btn-ghost" id="show-op-enroll" style="width:100%;margin-top:12px;font-size:13px">Registrarme como operador</button>
       </div>
 
       <div id="login-enroll-block" class="login-form" style="display:none;margin-top:18px">
@@ -3511,7 +3473,11 @@ function renderLogin(errorMsg) {
         <label class="form-label">Apellido</label>
         <input class="minput" id="enroll-last" placeholder="Apellido" style="width:100%;margin-bottom:10px"/>
         <label class="form-label">Correo electrónico</label>
-        <input class="minput" id="enroll-email" type="email" placeholder="tu@correo.com" style="width:100%;margin-bottom:16px"/>
+        <input class="minput" id="enroll-email" type="email" placeholder="tu@correo.com" style="width:100%;margin-bottom:10px"/>
+        <label class="form-label">Contraseña</label>
+        <input class="minput" id="enroll-pass" type="password" placeholder="Mínimo 6 caracteres" style="width:100%;margin-bottom:10px"/>
+        <label class="form-label">Confirmar contraseña</label>
+        <input class="minput" id="enroll-pass2" type="password" placeholder="Repite tu contraseña" style="width:100%;margin-bottom:16px"/>
         <div id="enroll-err" class="ibar ibar-r" style="display:none;margin-bottom:10px"></div>
         <button class="startup-go" id="enroll-btn">Registrarme</button>
         <button class="btn btn-ghost" id="hide-enroll" style="margin-top:8px">Cancelar</button>
@@ -3519,78 +3485,68 @@ function renderLogin(errorMsg) {
 
     </div>`;
 
-  // Admin login
+  // Unified login (admins, master admin, and operators all use this)
   const doLogin = async () => {
     const email = $('login-email')?.value.trim();
     const pass  = $('login-pass')?.value;
     const errEl = $('login-err');
     if (errEl) errEl.style.display = 'none';
+    if (!email || !pass) {
+      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Ingresa tu correo y contraseña.'; }
+      return;
+    }
     try {
       await auth.signInWithEmailAndPassword(email, pass);
     } catch (e) {
-      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Correo o contraseña incorrectos.'; }
+      if (errEl) {
+        errEl.style.display = 'block';
+        errEl.textContent = e.code === 'auth/user-not-found' || e.code === 'auth/wrong-password' || e.code === 'auth/invalid-credential'
+          ? 'Correo o contraseña incorrectos.'
+          : 'Error al iniciar sesión. Intenta de nuevo.';
+      }
     }
   };
   $('login-btn')?.addEventListener('click', doLogin);
   $('login-pass')?.addEventListener('keydown', e => e.key === 'Enter' && doLogin());
 
-  // Show/hide operator panels
-  $('show-op-login')?.addEventListener('click', () => {
-    $('login-op-block').style.display = 'block';
-    $('login-enroll-block').style.display = 'none';
-    $('login-admin-block').style.display = 'none';
-  });
+  // Show/hide enrollment panel
   $('show-op-enroll')?.addEventListener('click', () => {
     $('login-enroll-block').style.display = 'block';
-    $('login-op-block').style.display = 'none';
-    $('login-admin-block').style.display = 'none';
-  });
-  $('hide-op-login')?.addEventListener('click', () => {
-    $('login-op-block').style.display = 'none';
-    $('login-admin-block').style.display = 'block';
+    $('login-main-block').style.display = 'none';
   });
   $('hide-enroll')?.addEventListener('click', () => {
     $('login-enroll-block').style.display = 'none';
-    $('login-admin-block').style.display = 'block';
+    $('login-main-block').style.display = 'block';
   });
 
-  // Operator login
-  const doOpLogin = async () => {
-    const email = $('op-login-email')?.value.trim();
-    const errEl = $('op-login-err');
-    if (errEl) errEl.style.display = 'none';
-    if (!email) return;
-    try {
-      await auth.signInWithEmailAndPassword(email, OPERATOR_PASSWORD);
-    } catch (e) {
-      if (errEl) {
-        errEl.style.display = 'block';
-        errEl.textContent = e.code === 'auth/user-not-found' || e.code === 'auth/wrong-password' || e.code === 'auth/invalid-credential'
-          ? 'Correo no registrado. Usa el botón "Registrarme".'
-          : 'Error al iniciar sesión. Intenta de nuevo.';
-      }
-    }
-  };
-  $('op-login-btn')?.addEventListener('click', doOpLogin);
-  $('op-login-email')?.addEventListener('keydown', e => e.key === 'Enter' && doOpLogin());
-
-  // Operator enrollment
+  // Operator self-enrollment
   const doEnroll = async () => {
     const code  = $('enroll-code')?.value.trim().toUpperCase();
     const first = $('enroll-first')?.value.trim();
     const last  = $('enroll-last')?.value.trim();
     const email = $('enroll-email')?.value.trim();
+    const pass  = $('enroll-pass')?.value;
+    const pass2 = $('enroll-pass2')?.value;
     const errEl = $('enroll-err');
     if (errEl) errEl.style.display = 'none';
-    if (!code || !first || !last || !email) {
-      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Completa todos los campos, incluyendo el código de invitación.'; }
+
+    if (!code || !first || !last || !email || !pass || !pass2) {
+      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Completa todos los campos.'; }
+      return;
+    }
+    if (pass.length < 6) {
+      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'La contraseña debe tener al menos 6 caracteres.'; }
+      return;
+    }
+    if (pass !== pass2) {
+      if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Las contraseñas no coinciden.'; }
       return;
     }
 
     let cred = null;
     try {
       state._enrolling = true;
-      cred = await auth.createUserWithEmailAndPassword(email, OPERATOR_PASSWORD);
+      cred = await auth.createUserWithEmailAndPassword(email, pass);
 
       const evSnap = await db.collection('forza_eventos')
         .where('inviteCode', '==', code)
@@ -3640,13 +3596,13 @@ function renderLogin(errorMsg) {
       if (errEl) {
         errEl.style.display = 'block';
         errEl.textContent = e.code === 'auth/email-already-in-use'
-          ? 'Este correo ya está registrado. Usa "Soy operador" para entrar.'
+          ? 'Este correo ya está registrado. Inicia sesión directamente.'
           : e.message;
       }
     }
   };
   $('enroll-btn')?.addEventListener('click', doEnroll);
-  $('enroll-email')?.addEventListener('keydown', e => e.key === 'Enter' && doEnroll());
+  $('enroll-pass2')?.addEventListener('keydown', e => e.key === 'Enter' && doEnroll());
 }
 
 
