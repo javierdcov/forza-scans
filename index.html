@@ -322,6 +322,7 @@ input:checked + .swss::before { transform:translateX(12px) }
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-functions-compat.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://apis.google.com/js/api.js" async defer></script>
 <script>
@@ -2269,7 +2270,8 @@ function showOperatorModal(op, listContainer) {
             'confirm-delete-op': async () => {
               closeModal();
               try {
-                await deleteDoc(userDocRef(op.uid));
+                const deleteFn = firebase.functions().httpsCallable('deleteUser');
+                await deleteFn({ uid: op.uid });
                 await refreshOperatorList(listContainer);
               } catch (e) {
                 alert('Error al eliminar: ' + e.message);
