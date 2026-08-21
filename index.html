@@ -467,6 +467,19 @@ const userDocRef    = uid => doc(db, 'forza_users', uid);
 const scansColRef   = roomId => collection(db, DB_ROOT, state.activeEventId, 'rooms', roomId, 'scans');
 const shiftsColRef  = roomId => collection(db, DB_ROOT, state.activeEventId, 'rooms', roomId, 'shifts');
 const shiftDocRef   = (roomId, shiftId) => doc(db, DB_ROOT, state.activeEventId, 'rooms', roomId, 'shifts', shiftId);
+// Semana 2 — Base de datos de atletas (forza_atletas, separada de forza_eventos — se elimina por evento)
+const ATLETAS_ROOT   = "forza_atletas";
+const atletasColRef  = () => collection(db, ATLETAS_ROOT, state.activeEventId, 'atletas');
+const atletaDocRef   = id => doc(db, ATLETAS_ROOT, state.activeEventId, 'atletas', id);
+const conteosColRef  = () => collection(db, ATLETAS_ROOT, state.activeEventId, 'conteos');
+const conteoDocRef   = id => doc(db, ATLETAS_ROOT, state.activeEventId, 'conteos', id);
+// Semana 2 — BoxLunch: caps por Estado+Deporte (o entidad manual), por comedor
+const boxlunchGroupsColRef = roomId => collection(db, DB_ROOT, state.activeEventId, 'rooms', roomId, 'boxlunch_groups');
+const boxlunchGroupDocRef  = (roomId, groupId) => doc(db, DB_ROOT, state.activeEventId, 'rooms', roomId, 'boxlunch_groups', groupId);
+// Firestore doc IDs no pueden contener "/" — sanitiza folio/entidad/deporte antes de usarlos como ID
+function sanitizeId(s) { return String(s == null ? '' : s).trim().replace(/\//g, '-').replace(/\s+/g, ' '); }
+function atletaId(folio, deporte) { return `${sanitizeId(folio)}__${sanitizeId(deporte)}`; }
+function groupKeyId(entidad, deporte) { return `${sanitizeId(entidad)}__${sanitizeId(deporte)}`; }
 
 // ── Auth state ────────────────────────────────────────────────
 auth.onAuthStateChanged(async user => {
@@ -633,6 +646,49 @@ function getOpenShift() {
   return state.shifts.find(s => s.status === 'open') || null;
 }
 
+// ── Semana 2 — Enriquecimiento de atletas al escanear ──────────
+// Si el folio+deporte escaneado existe en forza_atletas y aún no tiene
+// categoria/disciplinas, se llenan desde el QR. Nunca sobrescribe un
+// enriquecimiento previo (primer valor registrado en campo se conserva).
+async function enrichAtletaIfNeeded(parsed) {
+  if (!parsed?.code || !parsed?.sport) return;
+  try {
+    const ref  = atletaDocRef(atletaId(parsed.code, parsed.sport));
+    const snap = await getDoc(ref);
+    if (!snap.exists) return; // folio+deporte no está en la BD importada — nada que enriquecer
+    const data = snap.data() || {};
+    if (data.categoria || (data.disciplinas && data.disciplinas.length)) return; // ya enriquecido
+    const categoria   = parsed.categories?.[0] || null;   // QR línea 5
+    const disciplinas = (parsed.categories || []).slice(1); // QR líneas 6+
+    if (!categoria && disciplinas.length === 0) return;
+    await updateDoc(ref, { categoria, disciplinas, enriquecidoEn: serverTimestamp() });
+  } catch(e) {
+    console.warn('[ATLETAS] Enriquecimiento falló:', e.message);
+  }
+}
+
+// ── Semana 2 — Guardia anti doble conteo de BoxLunch ────────────
+// Si el grupo (Estado+Deporte) del atleta escaneado ya tiene loncheras
+// registradas para el turno actual (comida siempre, desayuno si el grupo
+// lo tiene habilitado), se deniega automáticamente el acceso al comedor
+// para ese turno — evita que reciban lonchera Y también coman en el comedor.
+function checkBoxLunchDoubleDip(parsed) {
+  if (!parsed?.state || !parsed?.sport) return null;
+  const openShift = getOpenShift();
+  const mealKey = openShift?.shiftKey;
+  if (!mealKey || (mealKey !== 'comida' && mealKey !== 'desayuno')) return null;
+  const hit = state.scans.find(s =>
+    s.type === 'boxlunch' &&
+    s.entidad === parsed.state &&
+    s.deporte === parsed.sport &&
+    s.meal === mealKey &&
+    (mealKey === 'comida' || s.appliesToBreakfast === true) &&
+    (s.qty || 0) > 0
+  );
+  if (!hit) return null;
+  return { result: 'denied', reason: `${parsed.state} · ${parsed.sport} ya solicitó BoxLunch para este turno — no puede recibir acceso también` };
+}
+
 // ── Write scan to Firestore ───────────────────────────────────
 async function writeScan(parsed, result, type = 'scan') {
   const room = state.rooms.find(r => r.id === state.activeRoomId);
@@ -663,6 +719,7 @@ function profileKey(p) {
 
 async function processScan(raw) {
   const parsed  = parseQR(raw);
+  if (parsed) enrichAtletaIfNeeded(parsed); // fire-and-forget, no bloquea el flujo de escaneo
   const room    = state.rooms.find(r => r.id === state.activeRoomId);
   const access  = room?.access || {};
   const result  = checkAccess(parsed, access);
@@ -679,6 +736,14 @@ async function processScan(raw) {
       showScanResult(parsed, { result: 'duplicate', reason: `Ya registrado a las ${alreadyScanned.time}` });
       return;
     }
+  }
+
+  // BoxLunch — doble conteo: el grupo ya recibió loncheras para este turno
+  const boxlunchDeny = checkBoxLunchDoubleDip(parsed);
+  if (boxlunchDeny) {
+    await writeScan(parsed, boxlunchDeny);
+    showScanResult(parsed, boxlunchDeny);
+    return;
   }
 
   if (parsed && result.result === 'pending' && deniedProfiles.has(profileKey(parsed))) {
@@ -925,7 +990,7 @@ function buildApp(isAdmin, room) {
   // Tab bar (admin only)
   if (isAdmin) {
     const tabs = el('div', 'tabs');
-    [['scanner','Escáner'],['shifts','Turnos'],['operators','Operadores'],['reports','Reportes'],['room-admin','Comedor'],['global-admin','Evento']].forEach(([id, label]) => {
+    [['scanner','Escáner'],['shifts','Turnos'],['operators','Operadores'],['reports','Reportes'],['room-admin','Comedor'],['global-admin','Evento'],['boxlunch','BoxLunch']].forEach(([id, label]) => {
       const btn = el('button', `tab ${state.view === id ? 'on' : ''}`);
       btn.textContent = label;
       btn.onclick = () => { state.view = id; rerender(); };
@@ -948,6 +1013,11 @@ function buildApp(isAdmin, room) {
 else if (state.view === 'reports')        pg.appendChild(buildReports(room));
   else if (state.view === 'room-admin')     pg.appendChild(buildRoomAdmin(room));
   else if (state.view === 'global-admin')   pg.appendChild(buildGlobalAdmin());
+  else if (state.view === 'boxlunch') {
+    const placeholder2 = el('div', '');
+    pg.appendChild(placeholder2);
+    buildBoxLunchTab(room).then(tabEl => { placeholder2.replaceWith(tabEl); });
+  }
   wrap.appendChild(pg);
 
   // Wire signout + back button
@@ -3076,6 +3146,377 @@ function buildToggle(checked, onChange, size = 'md') {
   return label;
 }
 
+// ── Semana 2 — Importación de atletas CONADE (Excel → forza_atletas) ──
+const ATLETAS_COLUMNS = {
+  folio:    ['FOLIO'],
+  apPat:    ['APELLIDO PATERNO'],
+  apMat:    ['APELLIDO MATERNO'],
+  nombre:   ['NOMBRE'],
+  curp:     ['CURP'],
+  genero:   ['GENERO', 'GÉNERO'],
+  fechaNac: ['FECHA DE NACIMIENTO'],
+  entidad:  ['PARTICIPA POR'],
+  deporte:  ['DEPORTE'],
+  estatus:  ['ESTATUS'],
+};
+const ATLETAS_REQUIRED = ['folio', 'apPat', 'nombre', 'entidad', 'deporte', 'genero', 'fechaNac'];
+function normalizeHeader(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().trim().replace(/\s+/g, ' ');
+}
+function buildAtletasColumnMap(headerRow) {
+  const norm = headerRow.map(normalizeHeader);
+  const map = {};
+  Object.entries(ATLETAS_COLUMNS).forEach(([key, candidates]) => {
+    const normCandidates = candidates.map(normalizeHeader);
+    map[key] = norm.findIndex(h => normCandidates.includes(h));
+  });
+  return map;
+}
+function buildNombreCompleto(apPat, apMat, nombre) {
+  return [apPat, apMat, nombre].map(x => String(x || '').trim()).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+// CONADE exporta FECHA DE NACIMIENTO como texto MM/DD/YYYY — se guarda como YYYY-MM-DD
+function convertFechaNacimiento(v) {
+  if (!v) return null;
+  const s = String(v).trim();
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return s; // formato inesperado — se guarda tal cual para no perder el dato, revisar manualmente
+  const [, mm, dd, yyyy] = m;
+  return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+}
+async function importAtletasExcel(buf, { onStatus, onProgress }) {
+  onStatus('Leyendo archivo…');
+  const wb   = XLSX.read(new Uint8Array(buf), { type: 'array' });
+  const ws   = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  if (rows.length < 2) throw new Error('El archivo no tiene datos.');
+  const colMap  = buildAtletasColumnMap(rows[0]);
+  const missing = ATLETAS_REQUIRED.filter(k => colMap[k] === -1);
+  if (missing.length) throw new Error(`No se encontraron las columnas: ${missing.map(k => ATLETAS_COLUMNS[k][0]).join(', ')}. Verifica que sea el "Reporte Completo" del portal CONADE.`);
+
+  onStatus('Verificando registros existentes…');
+  const existingSnap = await getDocs(atletasColRef());
+  const existingIds  = new Set(existingSnap.docs.map(d => d.id));
+
+  const records = [];
+  const conteos = {}; // groupKeyId → { entidad, deporte, count }
+  let errors = 0;
+  rows.slice(1).forEach(row => {
+    const folio   = String(row[colMap.folio] || '').trim();
+    const deporte = String(row[colMap.deporte] || '').replace(/\s+/g, ' ').trim();
+    const entidad = String(row[colMap.entidad] || '').trim();
+    const genero  = String(row[colMap.genero] || '').trim();
+    if (!folio || !deporte || !entidad) { errors++; return; }
+    const nombre   = buildNombreCompleto(row[colMap.apPat], colMap.apMat > -1 ? row[colMap.apMat] : '', row[colMap.nombre]);
+    const curp     = colMap.curp > -1 ? (String(row[colMap.curp] || '').trim() || null) : null;
+    const estatus  = colMap.estatus > -1 ? (String(row[colMap.estatus] || '').trim() || null) : null;
+    const fechaNacimiento = convertFechaNacimiento(row[colMap.fechaNac]);
+    const id = atletaId(folio, deporte);
+    records.push({ id, data: { folio, nombre, entidad, deporte, genero, fechaNacimiento, curp, estatus, importadoEn: serverTimestamp() } });
+    const gk = groupKeyId(entidad, deporte);
+    if (!conteos[gk]) conteos[gk] = { entidad, deporte, count: 0 };
+    conteos[gk].count++;
+  });
+
+  const imported = records.filter(r => !existingIds.has(r.id)).length;
+  const updated  = records.length - imported;
+
+  onStatus(`Escribiendo ${records.length} registros…`);
+  const BATCH = 400;
+  for (let i = 0; i < records.length; i += BATCH) {
+    const chunk = records.slice(i, i + BATCH);
+    const batch = db.batch();
+    // merge:true — nunca incluye categoria/disciplinas/enriquecidoEn, así que el enriquecimiento
+    // de escaneos previos jamás se pierde al reimportar.
+    chunk.forEach(r => batch.set(atletaDocRef(r.id), r.data, { merge: true }));
+    await batch.commit();
+    onProgress(Math.min(100, Math.round(((i + chunk.length) / records.length) * 90)));
+  }
+
+  onStatus('Actualizando conteos por Estado y Deporte…');
+  const conteoEntries = Object.entries(conteos);
+  for (let i = 0; i < conteoEntries.length; i += BATCH) {
+    const chunk = conteoEntries.slice(i, i + BATCH);
+    const batch = db.batch();
+    chunk.forEach(([gk, c]) => batch.set(conteoDocRef(gk), { entidad: c.entidad, deporte: c.deporte, count: c.count, updatedAt: serverTimestamp() }));
+    await batch.commit();
+  }
+  onProgress(100);
+
+  const summary = { total: records.length, imported, updated, errors, at: new Date().toISOString() };
+  await setDoc(eventDocRef(), { atletasLastImport: summary }, { merge: true });
+  return summary;
+}
+async function deleteAtletasDatabase() {
+  const BATCH = 400;
+  for (const colRef of [atletasColRef(), conteosColRef()]) {
+    for (;;) {
+      const snap = await colRef.limit(BATCH).get();
+      if (snap.empty) break;
+      const batch = db.batch();
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+      if (snap.docs.length < BATCH) break;
+    }
+  }
+}
+function buildAtletasImportSection(isMasterAdmin) {
+  const wrap = el('div', '');
+  wrap.appendChild(el('div', 'sl', 'BASE DE DATOS DE ATLETAS (CONADE)'));
+  const lastImport = state.event?.atletasLastImport;
+  const info = el('div', 'ibar ibar-b');
+  info.innerHTML = lastImport
+    ? `Última importación: <strong>${new Date(lastImport.at).toLocaleString('es-MX')}</strong> — ${lastImport.total} registros (${lastImport.imported} nuevos, ${lastImport.updated} actualizados${lastImport.errors ? `, ${lastImport.errors} con errores` : ''}).`
+    : 'Sin importar aún. Sube el "Reporte Completo" (Excel) del portal CONADE — se fusiona con lo que ya exista, sin duplicar.';
+  wrap.appendChild(info);
+  const progWrap = el('div', '');
+  progWrap.id = 'atletas-progress-wrap';
+  progWrap.style.cssText = 'display:none;margin-bottom:10px';
+  progWrap.innerHTML = `
+    <div style="font-size:12px;color:var(--text2);margin-bottom:4px" id="atletas-progress-status">Procesando…</div>
+    <div style="background:var(--surface2);border-radius:6px;overflow:hidden;height:8px">
+      <div id="atletas-progress-fill" style="height:100%;width:0%;background:var(--blue);transition:width .2s"></div>
+    </div>`;
+  wrap.appendChild(progWrap);
+  const resultBox = el('div', ''); resultBox.id = 'atletas-result-box'; wrap.appendChild(resultBox);
+  const ulArea = el('div', 'upload-area', '<div style="font-size:18px;opacity:.5;margin-bottom:4px">📂</div><div>Toca para subir el Excel de CONADE</div><div style="font-size:11px;margin-top:3px;color:var(--text3)">Reporte Completo — se fusiona, no duplica</div>');
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file'; fileInput.accept = '.xlsx,.xls'; fileInput.style.display = 'none';
+  ulArea.appendChild(fileInput);
+  ulArea.onclick = () => fileInput.click();
+  wrap.appendChild(ulArea);
+  const driveBtn = el('button', 'btn-sm btn-sm-blue', '☁ Importar desde Google Drive');
+  driveBtn.style.cssText = 'width:100%;padding:10px;margin-bottom:8px';
+  driveBtn.id = 'atletas-drive-btn';
+  wrap.appendChild(driveBtn);
+  if (isMasterAdmin) {
+    const delBtn = el('button', 'btn-sm btn-sm-ghost', '🗑 Eliminar base de datos de atletas de este evento');
+    delBtn.style.cssText = 'width:100%;padding:9px;color:var(--red-text);border-color:var(--red-border);margin-top:4px';
+    delBtn.id = 'atletas-delete-btn';
+    wrap.appendChild(delBtn);
+  }
+  const runImport = async (buf) => {
+    progWrap.style.display = 'block';
+    resultBox.innerHTML = '';
+    const statusEl = $('atletas-progress-status');
+    const fillEl   = $('atletas-progress-fill');
+    try {
+      const summary = await importAtletasExcel(buf, {
+        onStatus:   msg => { if (statusEl) statusEl.textContent = msg; },
+        onProgress: pct => { if (fillEl) fillEl.style.width = pct + '%'; },
+      });
+      progWrap.style.display = 'none';
+      resultBox.innerHTML = `<div class="ibar ibar-g">✓ ${summary.total} registros procesados — ${summary.imported} nuevos, ${summary.updated} actualizados${summary.errors ? `, <strong>${summary.errors} con errores</strong> (fila sin folio/deporte/entidad)` : ''}.</div>`;
+      rerender();
+    } catch(e) {
+      progWrap.style.display = 'none';
+      resultBox.innerHTML = `<div class="ibar ibar-r">Error: ${e.message}</div>`;
+    }
+  };
+  setTimeout(() => {
+    fileInput.onchange = async e => {
+      const file = e.target.files[0]; if (!file) return;
+      await runImport(await file.arrayBuffer());
+    };
+    $('atletas-drive-btn')?.addEventListener('click', async () => {
+      try {
+        const { id, name, mimeType } = await pickDriveFile();
+        resultBox.innerHTML = `<div class="ibar ibar-b">Descargando "${name}"…</div>`;
+        await runImport(await downloadDriveFile(id, mimeType));
+      } catch(e) {
+        if (e.message !== 'cancelled') resultBox.innerHTML = `<div class="ibar ibar-r">Error: ${e.message}</div>`;
+      }
+    });
+    $('atletas-delete-btn')?.addEventListener('click', async () => {
+      if (!confirm('¿Eliminar TODA la base de datos de atletas de este evento? Esta acción no se puede deshacer. Los conteos usados por BoxLunch también se eliminarán.')) return;
+      resultBox.innerHTML = `<div class="ibar ibar-b">Eliminando…</div>`;
+      try {
+        await deleteAtletasDatabase();
+        await setDoc(eventDocRef(), { atletasLastImport: null }, { merge: true });
+        resultBox.innerHTML = `<div class="ibar ibar-g">✓ Base de datos de atletas eliminada.</div>`;
+        rerender();
+      } catch(e) {
+        resultBox.innerHTML = `<div class="ibar ibar-r">Error al eliminar: ${e.message}</div>`;
+      }
+    });
+  }, 0);
+  return wrap;
+}
+
+// ── Semana 2 — BoxLunch (control de loncheras) ──────────────────
+function boxLunchUsage(g, mealKey) {
+  const room   = state.rooms.find(r => r.id === state.activeRoomId);
+  const dayStr = today(room?.timezone || undefined);
+  const lunches = state.scans
+    .filter(s => s.type === 'boxlunch' && s.day === dayStr && s.meal === mealKey &&
+      (g.manual ? s.groupKey === g.id : (s.entidad === g.entidad && s.deporte === g.deporte)))
+    .reduce((sum, s) => sum + (s.qty || 0), 0);
+  let doorScans = 0;
+  if (!g.manual) {
+    doorScans = state.scans.filter(s => {
+      if (s.type !== 'scan' || s.day !== dayStr) return false;
+      if (s.parsed?.state !== g.entidad || s.parsed?.sport !== g.deporte) return false;
+      if (!(s.result?.result === 'granted' || s.result?.result === 'auto-added')) return false;
+      const sh = state.shifts.find(x => x.id === s.shiftId);
+      return sh?.shiftKey === mealKey;
+    }).length;
+  }
+  return { lunches, doorScans, total: lunches + doorScans };
+}
+async function writeBoxLunchEntry(g, mealKey, qty) {
+  const room = state.rooms.find(r => r.id === state.activeRoomId);
+  if (!room) return;
+  const tz = room.timezone || null;
+  const sh = state.shifts.find(s => s.shiftKey === mealKey);
+  const scanRef = doc(scansColRef(state.activeRoomId));
+  await setDoc(scanRef, {
+    type: 'boxlunch',
+    entidad: g.manual ? null : g.entidad,
+    deporte: g.manual ? null : g.deporte,
+    manual: !!g.manual,
+    groupKey: g.id,
+    groupLabel: g.label,
+    qty, meal: mealKey,
+    appliesToBreakfast: !!g.appliesToBreakfast,
+    shiftId: sh?.id || null, shiftName: sh?.name || mealKey,
+    day: today(tz), time: timeNow(tz), ts: serverTimestamp(),
+    enteredBy: state.profile?.name || state.authUser?.email || '',
+    roomId: state.activeRoomId, roomName: room.name,
+  });
+}
+async function saveGroupConfig(g, updates) {
+  await setDoc(boxlunchGroupDocRef(state.activeRoomId, g.id), {
+    entidad: g.entidad, deporte: g.deporte, manual: !!g.manual, label: g.label, ...updates,
+  }, { merge: true });
+}
+async function addManualBoxLunchGroup(label, cap) {
+  const ref = doc(boxlunchGroupsColRef(state.activeRoomId));
+  await setDoc(ref, { manual: true, entidad: null, deporte: null, label, cap, appliesToBreakfast: false, createdAt: serverTimestamp() });
+}
+function buildBoxLunchGroupRow(g) {
+  const card = el('div', 'shift-config-card');
+  const usageComida   = boxLunchUsage(g, 'comida');
+  const usageDesayuno = boxLunchUsage(g, 'desayuno');
+  const hdr = el('div', 'shift-config-hdr');
+  hdr.innerHTML = `
+    <div style="flex:1;min-width:140px">
+      <div style="font-size:13px;font-weight:700">${g.label}</div>
+      <div style="font-size:11px;color:var(--text2)">${g.manual ? 'Entidad manual' : `${g.roster} atleta(s) en la BD`}</div>
+    </div>`;
+  card.appendChild(hdr);
+  const body = el('div', '');
+  body.style.cssText = 'padding:8px 12px 12px';
+  body.innerHTML = `
+    <div class="mrow" style="align-items:center">
+      <label class="form-label" style="margin:0;flex:1">Tope de hoy</label>
+      <input class="minput" id="bl-cap-${g.id}" type="number" min="0" value="${g.cap}" style="width:80px"/>
+      <button class="btn-sm btn-sm-ghost" id="bl-cap-save-${g.id}">Guardar</button>
+    </div>
+    <div id="bl-bf-row-${g.id}" style="display:flex;align-items:center;gap:8px;margin-bottom:10px"></div>
+    <div class="stats-row" style="margin-bottom:10px">
+      <div class="stat-card"><div class="stat-num" style="font-size:16px">${usageDesayuno.total}<span style="font-size:11px;color:var(--text3)"> / ${g.cap}</span></div><div class="stat-label">Desayuno hoy (${usageDesayuno.lunches} lonch. + ${usageDesayuno.doorScans} comedor)</div></div>
+      <div class="stat-card"><div class="stat-num" style="font-size:16px">${usageComida.total}<span style="font-size:11px;color:var(--text3)"> / ${g.cap}</span></div><div class="stat-label">Comida hoy (${usageComida.lunches} lonch. + ${usageComida.doorScans} comedor)</div></div>
+    </div>
+    <div class="mrow">
+      <select class="minput" id="bl-meal-${g.id}" style="flex:1">
+        <option value="comida">☀️ Comida</option>
+        <option value="desayuno">🌅 Desayuno</option>
+      </select>
+      <input class="minput" id="bl-qty-${g.id}" type="number" min="1" value="1" style="width:70px"/>
+      <button class="mbtn" id="bl-submit-${g.id}">+ Registrar</button>
+    </div>
+    <div id="bl-msg-${g.id}" style="font-size:11px"></div>`;
+  card.appendChild(body);
+  setTimeout(() => {
+    const bfRow = $(`bl-bf-row-${g.id}`);
+    if (bfRow) {
+      const lbl = el('span', '', 'También bloquea doble conteo en Desayuno');
+      lbl.style.cssText = 'font-size:11px;color:var(--text2);flex:1';
+      bfRow.appendChild(lbl);
+      bfRow.appendChild(buildToggle(g.appliesToBreakfast, async val => { await saveGroupConfig(g, { appliesToBreakfast: val }); rerender(); }, 'sm'));
+    }
+    $(`bl-cap-save-${g.id}`)?.addEventListener('click', async () => {
+      const v = Number($(`bl-cap-${g.id}`)?.value || 0);
+      await saveGroupConfig(g, { cap: v });
+      rerender();
+    });
+    $(`bl-submit-${g.id}`)?.addEventListener('click', async () => {
+      const mealKey = $(`bl-meal-${g.id}`)?.value || 'comida';
+      const qty = Number($(`bl-qty-${g.id}`)?.value || 0);
+      const msgEl = $(`bl-msg-${g.id}`);
+      if (!qty || qty < 1) return;
+      const usage = boxLunchUsage(g, mealKey);
+      const projected = usage.total + qty;
+      if (g.cap != null && projected > g.cap) {
+        const ok = confirm(`⚠️ ${g.label}: ya van ${usage.total} de ${g.cap} para ${mealKey === 'comida' ? 'Comida' : 'Desayuno'} hoy.\nAgregar ${qty} más lo dejaría en ${projected}, por encima del tope.\n\n¿Registrar de todas formas?`);
+        if (!ok) return;
+      }
+      await writeBoxLunchEntry(g, mealKey, qty);
+      if (msgEl) { msgEl.style.color = 'var(--green-text)'; msgEl.textContent = `✓ ${qty} registrada(s).`; }
+      rerender();
+    });
+  }, 0);
+  return card;
+}
+async function buildBoxLunchTab(room) {
+  const wrap = el('div', '');
+  wrap.appendChild(el('div', 'sl', 'BOXLUNCH — CONTROL DE LONCHERAS'));
+  if (!room) { wrap.appendChild(el('div', 'ibar ibar-a', 'No hay comedor seleccionado.')); return wrap; }
+  const note = el('div', 'ibar ibar-b');
+  note.innerHTML = 'Registra las loncheras que un equipo o entidad pide, para evitar que pidan de más y para que esos atletas no "hagan doble" comiendo también en el comedor ese turno. El tope sugerido es el total de atletas de ese Estado+Deporte importados — edítalo cuando haya eliminaciones o el equipo no juegue ese día.';
+  wrap.appendChild(note);
+  let conteosSnap, groupsSnap;
+  try {
+    [conteosSnap, groupsSnap] = await Promise.all([getDocs(conteosColRef()), getDocs(boxlunchGroupsColRef(room.id))]);
+  } catch(e) {
+    wrap.appendChild(el('div', 'ibar ibar-r', `Error al cargar: ${e.message}`));
+    return wrap;
+  }
+  const groupDocs = {};
+  groupsSnap.docs.forEach(d => { groupDocs[d.id] = { id: d.id, ...d.data() }; });
+  const groups = [];
+  conteosSnap.docs.forEach(d => {
+    const c = d.data();
+    const existing = groupDocs[d.id];
+    groups.push({
+      id: d.id, entidad: c.entidad, deporte: c.deporte, manual: false,
+      label: `${c.entidad} · ${c.deporte}`, roster: c.count,
+      cap: existing?.cap != null ? existing.cap : c.count,
+      appliesToBreakfast: existing?.appliesToBreakfast || false,
+    });
+    delete groupDocs[d.id];
+  });
+  Object.values(groupDocs).forEach(g => {
+    if (!g.manual) return; // config huérfana de un grupo con atletas eliminados — se ignora
+    groups.push({ id: g.id, entidad: null, deporte: null, manual: true, label: g.label, roster: null, cap: g.cap || 0, appliesToBreakfast: g.appliesToBreakfast || false });
+  });
+  groups.sort((a, b) => a.label.localeCompare(b.label));
+  if (groups.length === 0) {
+    wrap.appendChild(el('div', 'lempty', 'Aún no hay grupos. Importa la base de datos de atletas en la pestaña Evento, o agrega una entidad manual abajo.'));
+  }
+  groups.forEach(g => wrap.appendChild(buildBoxLunchGroupRow(g)));
+  const addWrap = el('div', 'shift-config-card');
+  addWrap.style.marginTop = '10px';
+  addWrap.innerHTML = `
+    <div style="padding:10px 12px;font-size:12px;font-weight:700;color:var(--text2)">+ AGREGAR ENTIDAD MANUAL (ej. Árbitros)</div>
+    <div class="shift-config-times">
+      <input class="add-input" id="bl-manual-label" placeholder="Nombre (ej. Árbitros)" style="flex:1;min-width:120px"/>
+      <input class="add-input" id="bl-manual-cap" type="number" min="0" placeholder="Tope" style="width:70px"/>
+      <button class="add-go" id="bl-manual-add">+ Agregar</button>
+    </div>`;
+  wrap.appendChild(addWrap);
+  setTimeout(() => {
+    $('bl-manual-add')?.addEventListener('click', async () => {
+      const label = $('bl-manual-label')?.value.trim();
+      const cap   = Number($('bl-manual-cap')?.value || 0);
+      if (!label) return;
+      await addManualBoxLunchGroup(label, cap);
+      rerender();
+    });
+  }, 0);
+  return wrap;
+}
+
 // ── Global admin UI ───────────────────────────────────────────
 function buildGlobalAdmin() {
   const wrap = el('div', '');
@@ -3140,6 +3581,11 @@ function buildGlobalAdmin() {
   wrap.appendChild(addRoomRow);
 
   const div2 = el('div', 'sdiv'); wrap.appendChild(div2);
+
+  // ── Semana 2 — Base de datos de atletas (importación CONADE) ──
+  wrap.appendChild(buildAtletasImportSection(isMasterAdmin));
+
+  const div2b = el('div', 'sdiv'); wrap.appendChild(div2b);
 
   // Admin accounts info — master admin only
   if (isMasterAdmin) {
