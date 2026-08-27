@@ -689,15 +689,99 @@ function checkBoxLunchDoubleDip(parsed) {
   return { result: 'denied', reason: `${parsed.state} · ${parsed.sport} ya solicitó BoxLunch para este turno — no puede recibir acceso también` };
 }
 
+// ── Semana 3 — Búsqueda de atletas (reemplaza la entrada manual de texto) ──
+// Roster completo del evento, cargado una vez y cacheado en memoria (no es
+// un listener en vivo — se recarga solo al cambiar de evento o al pulsar
+// el botón de actualizar, para no generar lecturas de Firestore constantes).
+let atletasCache = null;
+let atletasCacheEventId = null;
+
+function normalizeSearch(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+async function loadAtletasCache(force = false) {
+  if (atletasCache && atletasCacheEventId === state.activeEventId && !force) return atletasCache;
+  const snap = await getDocs(atletasColRef());
+  atletasCache = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  atletasCacheEventId = state.activeEventId;
+  return atletasCache;
+}
+
+function distinctAtletaValues(field) {
+  if (!atletasCache) return [];
+  return [...new Set(atletasCache.map(a => a[field]).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es'));
+}
+
+// Coincide con el nombre en cualquier parte (no solo al inicio), sin acentos/mayúsculas.
+function searchAtletas(query, entidad, deporte, limit = 8) {
+  if (!atletasCache) return [];
+  const q = normalizeSearch(query);
+  return atletasCache.filter(a => {
+    if (entidad && a.entidad !== entidad) return false;
+    if (deporte && a.deporte !== deporte) return false;
+    if (q && !normalizeSearch(a.nombre).includes(q)) return false;
+    return true;
+  }).slice(0, limit);
+}
+
+// Convierte un registro de forza_atletas al mismo formato que produce parseQR,
+// para que pueda pasar por el mismo checkAccess/checkBoxLunchDoubleDip que un escaneo real.
+function atletaToParsed(a) {
+  const categories = a.categoria ? [a.categoria, ...(a.disciplinas || [])] : [];
+  return { code: a.folio, name: a.nombre, state: a.entidad, sport: a.deporte, categories, raw: null };
+}
+
+// Tarjeta de confirmación mostrada al elegir un resultado de búsqueda — no escribe
+// nada en Firestore hasta que el operador presiona "Confirmar" (requisito explícito
+// del cliente: un paso extra de seguridad antes de registrar una entrada manual).
+function showAtletaPreview(a) {
+  const resultsBox = $('atleta-search-results');
+  if (resultsBox) { resultsBox.style.display = 'none'; resultsBox.innerHTML = ''; }
+  const searchIn = $('atleta-search');
+  if (searchIn) searchIn.value = '';
+
+  const area = $('result-area');
+  if (!area) return;
+  const parsed = atletaToParsed(a);
+  area.innerHTML = `
+    <div class="rc pending">
+      <div class="rh"><div class="ri">?</div><div class="rs">Confirmar selección manual</div></div>
+      <div class="rname">${parsed.name}</div>
+      <div class="rcode">${parsed.code}</div>
+      <div class="pills">
+        ${parsed.state ? `<span class="pill pill-e">${parsed.state}</span>` : ''}
+        ${parsed.sport ? `<span class="pill pill-s">${parsed.sport}</span>` : ''}
+        ${(parsed.categories || []).slice(0,2).map(c => `<span class="pill pill-c">${c}</span>`).join('')}
+      </div>
+      ${!parsed.categories.length ? `<div class="pending-info">Este atleta aún no tiene categoría registrada (no se ha escaneado su gafete antes) — el acceso se evaluará solo por deporte y entidad.</div>` : ''}
+      <div class="decision-btns">
+        <button class="btn-sm btn-sm-green" onclick="window._confirmManualAtleta()">✓ Confirmar</button>
+        <button class="btn-sm btn-sm-ghost" onclick="window._cancelManualAtleta()">Cancelar</button>
+      </div>
+    </div>`;
+  window._manualAtletaParsed = parsed;
+  window._confirmManualAtleta = () => {
+    const p = window._manualAtletaParsed;
+    window._manualAtletaParsed = null;
+    if (p) handleScan(null, p);
+  };
+  window._cancelManualAtleta = () => {
+    window._manualAtletaParsed = null;
+    const area2 = $('result-area');
+    if (area2) area2.innerHTML = '';
+  };
+}
+
 // ── Write scan to Firestore ───────────────────────────────────
-async function writeScan(parsed, result, type = 'scan') {
+async function writeScan(parsed, result, type = 'scan', entryMethod = 'qr') {
   const room = state.rooms.find(r => r.id === state.activeRoomId);
   if (!room) return;
   const tz = room.timezone || null;
   const openShift = getOpenShift();
   const scanRef = doc(scansColRef(state.activeRoomId));
   await setDoc(scanRef, {
-    parsed, result, type,
+    parsed, result, type, entryMethod,
     shiftId:   openShift?.id || null,
     shiftName: openShift?.name || 'Sin turno',
     day:       today(tz),
@@ -717,19 +801,23 @@ function profileKey(p) {
   return `${p.sport}||${p.state}||${(p.categories || []).sort().join('|')}`;
 }
 
-async function processScan(raw) {
-  const parsed  = parseQR(raw);
-  if (parsed) enrichAtletaIfNeeded(parsed); // fire-and-forget, no bloquea el flujo de escaneo
+async function processScan(raw, preParsed) {
+  const parsed      = preParsed || parseQR(raw);
+  const entryMethod = preParsed ? 'manual' : 'qr'; // Semana 3 — búsqueda de atletas vs. lectura de QR
+  if (parsed && !preParsed) enrichAtletaIfNeeded(parsed); // fire-and-forget, no bloquea el flujo de escaneo
   const room    = state.rooms.find(r => r.id === state.activeRoomId);
   const access  = room?.access || {};
   const result  = checkAccess(parsed, access);
 
-  // Duplicate check — same credential already scanned in this shift
+  // Duplicate check — mismo folio Y mismo deporte ya escaneado en este turno.
+  // Semana 3: se agregó el deporte a la comparación — el mismo folio puede
+  // repetirse legítimamente en dos deportes distintos (ver hallazgo Semana 2).
   if (parsed?.code) {
     const openShift = getOpenShift();
     const alreadyScanned = state.scans.find(s =>
       s.type === 'scan' &&
       s.parsed?.code === parsed.code &&
+      s.parsed?.sport === parsed.sport &&
       (openShift ? s.shiftId === openShift.id : s.day === today())
     );
     if (alreadyScanned) {
@@ -741,31 +829,31 @@ async function processScan(raw) {
   // BoxLunch — doble conteo: el grupo ya recibió loncheras para este turno
   const boxlunchDeny = checkBoxLunchDoubleDip(parsed);
   if (boxlunchDeny) {
-    await writeScan(parsed, boxlunchDeny);
+    await writeScan(parsed, boxlunchDeny, 'scan', entryMethod);
     showScanResult(parsed, boxlunchDeny);
     return;
   }
 
   if (parsed && result.result === 'pending' && deniedProfiles.has(profileKey(parsed))) {
     const ar = { result: 'denied', reason: 'Perfil rechazado anteriormente' };
-    await writeScan(parsed, ar);
+    await writeScan(parsed, ar, 'scan', entryMethod);
     showScanResult(parsed, ar);
     return;
   }
 
   if (result.result === 'pending') {
-    pendingScan = { parsed, result };
+    pendingScan = { parsed, result, entryMethod };
     renderPendingCard(parsed, result);
     return;
   }
 
-  await writeScan(parsed, result);
+  await writeScan(parsed, result, 'scan', entryMethod);
   showScanResult(parsed, result);
 }
 
 async function decidePending(action) {
   if (!pendingScan) return;
-  const { parsed } = pendingScan;
+  const { parsed, entryMethod } = pendingScan;
   pendingScan = null;
 
   if (action === 'grant') {
@@ -773,12 +861,12 @@ async function decidePending(action) {
     const newAcc = mergeAccess(parsed, room?.access || {});
     await updateDoc(roomDocRef(state.activeRoomId), { access: newAcc });
     const gr = { result: 'granted', reason: 'Aprobado y agregado al sistema' };
-    await writeScan(parsed, gr);
+    await writeScan(parsed, gr, 'scan', entryMethod);
     showScanResult(parsed, gr);
   } else {
     deniedProfiles.add(profileKey(parsed));
     const dr = { result: 'denied', reason: 'Denegado manualmente' };
-    await writeScan(parsed, dr);
+    await writeScan(parsed, dr, 'scan', entryMethod);
     showScanResult(parsed, dr);
   }
 }
@@ -990,7 +1078,7 @@ function buildApp(isAdmin, room) {
   // Tab bar (admin only)
   if (isAdmin) {
     const tabs = el('div', 'tabs');
-    [['scanner','Escáner'],['shifts','Turnos'],['operators','Operadores'],['reports','Reportes'],['room-admin','Comedor'],['global-admin','Evento'],['boxlunch','BoxLunch']].forEach(([id, label]) => {
+    [['scanner','Escáner'],['shifts','Turnos'],['operators','Operadores'],['reports','Reportes'],['room-admin','Comedor'],['global-admin','Evento'],['boxlunch','BoxLunch'],['scan-history','Historial']].forEach(([id, label]) => {
       const btn = el('button', `tab ${state.view === id ? 'on' : ''}`);
       btn.textContent = label;
       btn.onclick = () => { state.view = id; rerender(); };
@@ -1017,6 +1105,11 @@ else if (state.view === 'reports')        pg.appendChild(buildReports(room));
     const placeholder2 = el('div', '');
     pg.appendChild(placeholder2);
     buildBoxLunchTab(room).then(tabEl => { placeholder2.replaceWith(tabEl); });
+  }
+  else if (state.view === 'scan-history') {
+    const placeholder3 = el('div', '');
+    pg.appendChild(placeholder3);
+    buildScanHistoryTab(room).then(tabEl => { placeholder3.replaceWith(tabEl); });
   }
   wrap.appendChild(pg);
 
@@ -1692,10 +1785,20 @@ function buildScanner(room, isAdmin) {
   startBtn.id = 'scan-toggle';
   wrap.appendChild(startBtn);
 
-  // Manual input
-  const manRow = el('div', 'mrow');
-  manRow.innerHTML = '<input class="minput" id="man-input" placeholder="Código manual…"/><button class="mbtn" id="man-btn">Verificar</button>';
-  wrap.appendChild(manRow);
+  // Búsqueda de atletas — reemplaza la entrada manual de código crudo (Semana 3)
+  const searchWrap = el('div', '');
+  searchWrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-bottom:8px';
+  searchWrap.innerHTML = `
+    <div style="display:flex;gap:6px">
+      <select class="minput" id="atleta-filter-entidad"><option value="">Todas las entidades</option></select>
+      <select class="minput" id="atleta-filter-deporte"><option value="">Todos los deportes</option></select>
+    </div>
+    <div style="display:flex;gap:6px">
+      <input class="minput" id="atleta-search" placeholder="Buscar atleta por nombre…"/>
+      <button class="mbtn" id="atleta-search-refresh" title="Actualizar roster">⟳</button>
+    </div>
+    <div id="atleta-search-results" style="display:none"></div>`;
+  wrap.appendChild(searchWrap);
 
   // Result area
   const resultArea = el('div', '');
@@ -1714,15 +1817,19 @@ function buildScanner(room, isAdmin) {
 
   // Wire events after render
   setTimeout(() => {
-    const toggle = $('scan-toggle');
-    const manBtn = $('man-btn');
-    const manIn  = $('man-input');
+    const toggle    = $('scan-toggle');
+    const searchIn  = $('atleta-search');
+    const filterEnt = $('atleta-filter-entidad');
+    const filterDep = $('atleta-filter-deporte');
+    const refreshBtn = $('atleta-search-refresh');
 
     // Block operators when no shift is open
     if (wrap._scanBlocked) {
-      if (toggle) { toggle.disabled = true; toggle.style.opacity = '0.4'; }
-      if (manBtn) { manBtn.disabled = true; manBtn.style.opacity = '0.4'; }
-      if (manIn)  { manIn.disabled = true; manIn.style.opacity = '0.4'; }
+      if (toggle)    { toggle.disabled = true; toggle.style.opacity = '0.4'; }
+      if (searchIn)  { searchIn.disabled = true; searchIn.style.opacity = '0.4'; }
+      if (filterEnt) { filterEnt.disabled = true; filterEnt.style.opacity = '0.4'; }
+      if (filterDep) { filterDep.disabled = true; filterDep.style.opacity = '0.4'; }
+      if (refreshBtn){ refreshBtn.disabled = true; refreshBtn.style.opacity = '0.4'; }
       return;
     }
 
@@ -1850,8 +1957,54 @@ function buildScanner(room, isAdmin) {
       }
     };
 
-    if (manBtn) manBtn.onclick = () => { const v = manIn?.value?.trim(); if (v) { handleScan(v); manIn.value = ''; } };
-    if (manIn)  manIn.onkeydown = e => { if (e.key === 'Enter') { const v = manIn.value.trim(); if (v) { handleScan(v); manIn.value = ''; } } };
+    // Búsqueda de atletas (Semana 3) — carga el roster una vez, filtra en memoria
+    const resultsBox = $('atleta-search-results');
+    function renderAtletaResults() {
+      if (!resultsBox) return;
+      const q   = searchIn?.value || '';
+      const ent = filterEnt?.value || '';
+      const dep = filterDep?.value || '';
+      if (!q.trim() && !ent && !dep) { resultsBox.style.display = 'none'; resultsBox.innerHTML = ''; return; }
+      const matches = searchAtletas(q, ent, dep);
+      resultsBox.style.display = 'block';
+      if (matches.length === 0) {
+        resultsBox.innerHTML = '<div class="lempty">Sin coincidencias</div>';
+        return;
+      }
+      resultsBox.innerHTML = '';
+      matches.forEach(a => {
+        const row = el('div', 'li tappable');
+        row.innerHTML = `
+          <div style="flex:1;min-width:0">
+            <div class="ln">${a.nombre}</div>
+            <div class="lm">${a.deporte} · ${a.entidad}${a.categoria ? ' · ' + a.categoria : ''}</div>
+          </div>
+          <div class="ledit">›</div>`;
+        row.onclick = () => showAtletaPreview(a);
+        resultsBox.appendChild(row);
+      });
+    }
+    function populateFilterOptions() {
+      if (filterEnt) {
+        filterEnt.innerHTML = '<option value="">Todas las entidades</option>';
+        distinctAtletaValues('entidad').forEach(v => filterEnt.appendChild(new Option(v, v)));
+      }
+      if (filterDep) {
+        filterDep.innerHTML = '<option value="">Todos los deportes</option>';
+        distinctAtletaValues('deporte').forEach(v => filterDep.appendChild(new Option(v, v)));
+      }
+    }
+    loadAtletasCache().then(populateFilterOptions);
+    if (searchIn)   searchIn.oninput   = () => { if (!scanCooldown) renderAtletaResults(); };
+    if (filterEnt)  filterEnt.onchange = () => { if (!scanCooldown) renderAtletaResults(); };
+    if (filterDep)  filterDep.onchange = () => { if (!scanCooldown) renderAtletaResults(); };
+    if (refreshBtn) refreshBtn.onclick = async () => {
+      refreshBtn.disabled = true; refreshBtn.textContent = '…';
+      await loadAtletasCache(true);
+      populateFilterOptions();
+      renderAtletaResults();
+      refreshBtn.disabled = false; refreshBtn.textContent = '⟳';
+    };
   }, 0);
 
   return wrap;
@@ -2013,10 +2166,10 @@ function stopCamera() {
   cameraActive = false;
 }
 
-async function handleScan(raw) {
+async function handleScan(raw, preParsed) {
   if (scanCooldown) return;
   scanCooldown = true;
-  await processScan(raw);
+  await processScan(raw, preParsed);
 
   // For duplicate results: show the warning briefly, re-enable scanning quickly
   // so the operator doesn't have to wait the full cooldown to scan the next person
@@ -2677,6 +2830,102 @@ function buildReports(room) {
 // Expose to inline onclick
 window.exportForzaCSV   = exportForzaCSV;
 window.exportGovReport  = exportGovReport;
+
+// ── Semana 3 — Historial de escaneos (Punto B) ─────────────────
+// Vista de solo lectura para admins: busca escaneos pasados del comedor
+// actual por fecha, nombre/folio y resultado. Se consulta bajo demanda
+// (botón "Cargar") en vez de un listener en vivo, para no generar lecturas
+// de Firestore automáticas cada vez que se abre la pestaña.
+const RESULT_LABELS_HIST = { granted: 'Permitido', denied: 'Denegado', 'auto-added': 'Aprobado', duplicate: 'Duplicado' };
+
+async function buildScanHistoryTab(room) {
+  const wrap = el('div', '');
+  wrap.appendChild(el('div', 'sl', `HISTORIAL DE ESCANEOS — ${room?.name || ''}`));
+
+  const filterCard = el('div', 'export-box');
+  filterCard.innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <input class="minput" id="hist-date" type="date" value="${today(room?.timezone)}" style="flex:1;min-width:120px"/>
+      <select class="minput" id="hist-result" style="flex:1;min-width:120px">
+        <option value="">Todos los resultados</option>
+        <option value="granted">Permitido</option>
+        <option value="denied">Denegado</option>
+        <option value="auto-added">Aprobado</option>
+        <option value="duplicate">Duplicado</option>
+      </select>
+    </div>
+    <input class="minput" id="hist-query" placeholder="Buscar por nombre o folio…" style="width:100%;margin-bottom:8px"/>
+    <button class="btn-sm btn-sm-blue" id="hist-load-btn" style="width:100%;padding:9px">Cargar historial</button>
+    <div id="hist-status" class="ibar ibar-b" style="display:none;margin-top:8px"></div>`;
+  wrap.appendChild(filterCard);
+
+  const resultsWrap = el('div', '');
+  resultsWrap.id = 'hist-results';
+  wrap.appendChild(resultsWrap);
+
+  setTimeout(() => {
+    const dateIn    = $('hist-date');
+    const resultIn  = $('hist-result');
+    const queryIn   = $('hist-query');
+    const loadBtn   = $('hist-load-btn');
+    const statusEl  = $('hist-status');
+    let allScansForDay = null; // cache — se recarga solo al presionar "Cargar" de nuevo
+
+    function renderHistResults() {
+      if (!allScansForDay) return;
+      const q      = normalizeSearch(queryIn?.value || '');
+      const result = resultIn?.value || '';
+      const matches = allScansForDay.filter(s => {
+        if (result && s.result?.result !== result) return false;
+        if (q) {
+          const hay = normalizeSearch(`${s.parsed?.name || ''} ${s.parsed?.code || ''}`);
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+      resultsWrap.innerHTML = '';
+      if (matches.length === 0) {
+        resultsWrap.appendChild(el('div', 'lempty', 'Sin coincidencias para este día.'));
+        return;
+      }
+      matches.forEach(s => {
+        const res = s.result?.result || 'unknown';
+        const row = el('div', 'li');
+        row.innerHTML = `
+          <div class="ld ${res === 'auto-added' ? 'granted' : res}"></div>
+          <div style="flex:1;min-width:0">
+            <div class="ln">${s.parsed?.name || 'Desconocido'} ${s.entryMethod === 'manual' ? '<span class="pill pill-e" style="margin-left:4px">manual</span>' : ''}</div>
+            <div class="lm">${s.parsed?.sport || ''} · ${s.parsed?.state || ''} · ${RESULT_LABELS_HIST[res] || res}</div>
+          </div>
+          <div class="ltime">${s.time || ''}</div>`;
+        resultsWrap.appendChild(row);
+      });
+    }
+
+    if (loadBtn) loadBtn.onclick = async () => {
+      const day = dateIn?.value || today(room?.timezone);
+      loadBtn.disabled = true;
+      statusEl.style.display = 'block';
+      statusEl.className = 'ibar ibar-b';
+      statusEl.textContent = 'Cargando…';
+      try {
+        const snap = await getDocs(scansColRef(room.id));
+        allScansForDay = snap.docs.map(d => d.data()).filter(s => s.type === 'scan' && s.day === day);
+        statusEl.textContent = `${allScansForDay.length} registro(s) el ${day}.`;
+        renderHistResults();
+      } catch (e) {
+        statusEl.className = 'ibar ibar-r';
+        statusEl.textContent = `Error: ${e.message}`;
+      } finally {
+        loadBtn.disabled = false;
+      }
+    };
+    if (queryIn)  queryIn.oninput   = renderHistResults;
+    if (resultIn) resultIn.onchange = renderHistResults;
+  }, 0);
+
+  return wrap;
+}
 
 // ── Room admin UI ─────────────────────────────────────────────
 function buildRoomAdmin(room) {
