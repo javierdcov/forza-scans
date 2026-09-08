@@ -613,6 +613,22 @@ function checkAccess(parsed, access) {
   if (parsed.sport === 'Sin Servicio') return { result: 'denied', reason: 'Sin Servicio — no autorizado', missing: [] };
   const sA = access?.[parsed.sport];
   if (!sA) return { result: 'pending', reason: `Deporte no registrado: "${parsed.sport}"`, missing: ['sport'] };
+
+  // Semana 4 — Filtro por Género (opcional, apagado por defecto en cada deporte).
+  // El género NO viene en el QR — se lee de parsed.genero, que processScan llena
+  // desde forza_atletas antes de llamar aquí. Si no se puede determinar, se manda
+  // a revisión manual en vez de negar o dejar pasar a ciegas.
+  if (sA.generoGate?.enabled) {
+    const genero = parsed.genero || null;
+    if (!genero) {
+      return { result: 'pending', reason: `No se pudo verificar el género para el filtro de ${parsed.sport} — revisión manual`, missing: ['genero'] };
+    }
+    const gCfg = sA.generoGate[genero];
+    if (!gCfg || !gCfg.enabled) {
+      return { result: 'denied', reason: `${parsed.sport} — acceso desactivado hoy para ${genero}`, missing: [] };
+    }
+  }
+
   // Sport-level `enabled` is a cascade convenience only — access is gated by state + category.
   const stA = sA.states?.[parsed.state];
   if (!stA) return { result: 'pending', reason: `Delegación no registrada: "${parsed.state}"`, missing: ['state'] };
@@ -729,7 +745,17 @@ function searchAtletas(query, entidad, deporte, limit = 8) {
 // para que pueda pasar por el mismo checkAccess/checkBoxLunchDoubleDip que un escaneo real.
 function atletaToParsed(a) {
   const categories = a.categoria ? [a.categoria, ...(a.disciplinas || [])] : [];
-  return { code: a.folio, name: a.nombre, state: a.entidad, sport: a.deporte, categories, raw: null };
+  return { code: a.folio, name: a.nombre, state: a.entidad, sport: a.deporte, categories, genero: a.genero || null, estatus: a.estatus || null, raw: null };
+}
+
+// Semana 4 — Busca el registro de forza_atletas correspondiente a un escaneo (QR o manual)
+// usando el mismo ID compuesto folio+deporte que la importación y el enriquecimiento.
+// El género NUNCA viene en el QR — solo existe en el roster importado, así que esta
+// es la única forma de saberlo en el momento del escaneo.
+function findAtletaByParsed(parsed) {
+  if (!atletasCache || !parsed?.code || !parsed?.sport) return null;
+  const id = atletaId(parsed.code, parsed.sport);
+  return atletasCache.find(a => a.id === id) || null;
 }
 
 // Tarjeta de confirmación mostrada al elegir un resultado de búsqueda — no escribe
@@ -752,8 +778,10 @@ function showAtletaPreview(a) {
       <div class="pills">
         ${parsed.state ? `<span class="pill pill-e">${parsed.state}</span>` : ''}
         ${parsed.sport ? `<span class="pill pill-s">${parsed.sport}</span>` : ''}
+        ${parsed.genero ? `<span class="pill pill-e">${parsed.genero}</span>` : ''}
         ${(parsed.categories || []).slice(0,2).map(c => `<span class="pill pill-c">${c}</span>`).join('')}
       </div>
+      ${estatusWarningHtml(parsed)}
       ${!parsed.categories.length ? `<div class="pending-info">Este atleta aún no tiene categoría registrada (no se ha escaneado su gafete antes) — el acceso se evaluará solo por deporte y entidad.</div>` : ''}
       <div class="decision-btns">
         <button class="btn-sm btn-sm-green" onclick="window._confirmManualAtleta()">✓ Confirmar</button>
@@ -805,6 +833,14 @@ async function processScan(raw, preParsed) {
   const parsed      = preParsed || parseQR(raw);
   const entryMethod = preParsed ? 'manual' : 'qr'; // Semana 3 — búsqueda de atletas vs. lectura de QR
   if (parsed && !preParsed) enrichAtletaIfNeeded(parsed); // fire-and-forget, no bloquea el flujo de escaneo
+  // Semana 4 — el género y el estatus no vienen en el QR; se buscan en el roster
+  // cacheado (ya se conoce si el escaneo vino de la búsqueda manual, atletaToParsed
+  // ya los puso ahí). Una sola consulta al roster para ambos campos.
+  if (parsed && parsed.genero === undefined) {
+    const atleta = findAtletaByParsed(parsed);
+    parsed.genero  = atleta?.genero  || null;
+    parsed.estatus = atleta?.estatus || null;
+  }
   const room    = state.rooms.find(r => r.id === state.activeRoomId);
   const access  = room?.access || {};
   const result  = checkAccess(parsed, access);
@@ -2196,6 +2232,15 @@ async function handleScan(raw, preParsed) {
   }, cooldownMs);
 }
 
+// Semana 4 — Advertencia de Estatus CONADE (Validado/Revisión/Rechazado/No Completado).
+// NO bloquea el acceso — es informativa para que el operador/admin decida. El campo
+// estatus solo existe si un futuro export de CONADE lo incluye (en la muestra de la
+// Semana 2 esta columna no venía en el "Reporte Completo"); si no está, esto no hace nada.
+function estatusWarningHtml(parsed) {
+  if (parsed?.estatus !== 'Rechazado') return '';
+  return `<div class="ibar ibar-a" style="margin-top:8px;margin-bottom:0">⚠️ Estatus CONADE: <strong>Rechazado</strong> — no bloquea el acceso, es solo informativo.</div>`;
+}
+
 function showScanResult(parsed, result) {
   const area = $('result-area');
   if (!area) return;
@@ -2209,9 +2254,11 @@ function showScanResult(parsed, result) {
         <div class="pills">
           ${parsed.state ? `<span class="pill pill-e">${parsed.state}</span>` : ''}
           ${parsed.sport ? `<span class="pill pill-s">${parsed.sport}</span>` : ''}
+          ${parsed.genero ? `<span class="pill pill-e">${parsed.genero}</span>` : ''}
           ${(parsed.categories || []).slice(0,2).map(c => `<span class="pill pill-c">${c}</span>`).join('')}
         </div>` : ''}
       <div class="rr">${result.reason || ''}</div>
+      ${estatusWarningHtml(parsed)}
     </div>`;
 }
 function renderPendingCard(parsed, result) {
@@ -2229,9 +2276,11 @@ function renderPendingCard(parsed, result) {
           <div class="pills">
             ${parsed.state ? `<span class="pill pill-e">${parsed.state}</span>` : ''}
             ${parsed.sport ? `<span class="pill pill-s">${parsed.sport}</span>` : ''}
+            ${parsed.genero ? `<span class="pill pill-e">${parsed.genero}</span>` : ''}
             ${(parsed.categories || []).slice(0,2).map(c => `<span class="pill pill-c">${c}</span>`).join('')}
           </div>` : ''}
         <div class="rr">${result.reason}</div>
+        ${estatusWarningHtml(parsed)}
         <div class="pending-info">Al aprobar, este perfil se agrega al sistema. Todos los siguientes con el mismo deporte, estado y categoría pasarán automáticamente.</div>
         <div class="decision-btns">
           <button class="btn-sm btn-sm-green" onclick="window._decidePending('grant')">✓ Aprobar y agregar</button>
@@ -2252,9 +2301,11 @@ function renderPendingCard(parsed, result) {
         <div class="pills">
           ${parsed.state ? `<span class="pill pill-e">${parsed.state}</span>` : ''}
           ${parsed.sport ? `<span class="pill pill-s">${parsed.sport}</span>` : ''}
+          ${parsed.genero ? `<span class="pill pill-e">${parsed.genero}</span>` : ''}
           ${(parsed.categories || []).slice(0,2).map(c => `<span class="pill pill-c">${c}</span>`).join('')}
         </div>` : ''}
       <div class="rr">${result.reason}</div>
+      ${estatusWarningHtml(parsed)}
 
       ${!hasPin ? `
         <div class="ibar ibar-r" style="margin-top:10px;margin-bottom:0">
@@ -2895,7 +2946,7 @@ async function buildScanHistoryTab(room) {
           <div class="ld ${res === 'auto-added' ? 'granted' : res}"></div>
           <div style="flex:1;min-width:0">
             <div class="ln">${s.parsed?.name || 'Desconocido'} ${s.entryMethod === 'manual' ? '<span class="pill pill-e" style="margin-left:4px">manual</span>' : ''}</div>
-            <div class="lm">${s.parsed?.sport || ''} · ${s.parsed?.state || ''} · ${RESULT_LABELS_HIST[res] || res}</div>
+            <div class="lm">${s.parsed?.sport || ''} · ${s.parsed?.state || ''}${s.parsed?.genero ? ' · ' + s.parsed.genero : ''} · ${RESULT_LABELS_HIST[res] || res}</div>
           </div>
           <div class="ltime">${s.time || ''}</div>`;
         resultsWrap.appendChild(row);
@@ -3280,6 +3331,48 @@ function buildSportBlock(room, sport, sObj) {
     if (opening) state.openSportBodies.add(sport);
     else          state.openSportBodies.delete(sport);
   };
+
+  // ── Semana 4 — Filtro por Género (opcional, apagado por defecto) ──────────
+  // El género de un atleta solo existe en el roster importado de CONADE (forza_atletas),
+  // nunca en el QR — por eso este filtro depende de que ese deporte ya se haya importado.
+  const generoGate = sObj.generoGate || { enabled: false, Masculino: { enabled: true }, Femenino: { enabled: true } };
+  const gWrap = el('div', '');
+  gWrap.style.cssText = 'padding:8px 10px;margin-bottom:8px;background:var(--surface2);border-radius:8px';
+  const gHdr = el('div', '');
+  gHdr.style.cssText = 'display:flex;align-items:center;gap:8px';
+  gHdr.innerHTML = '<span style="font-size:12px;font-weight:600;flex:1">Filtro por Género (hoy)</span>';
+  const gToggle = buildToggle(generoGate.enabled === true, async val => {
+    const newAcc = JSON.parse(JSON.stringify(room.access));
+    if (!newAcc[sport].generoGate) newAcc[sport].generoGate = { enabled: false, Masculino: { enabled: true }, Femenino: { enabled: true } };
+    newAcc[sport].generoGate.enabled = val;
+    await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
+  }, 'sm');
+  gHdr.appendChild(gToggle);
+  gWrap.appendChild(gHdr);
+  if (generoGate.enabled === true) {
+    ['Masculino', 'Femenino'].forEach(g => {
+      const row = el('div', 'crow');
+      row.style.marginTop = '6px';
+      row.innerHTML = `<span class="clabel">${g}</span>`;
+      row.appendChild(buildToggle(generoGate[g]?.enabled !== false, async val => {
+        const newAcc = JSON.parse(JSON.stringify(room.access));
+        if (!newAcc[sport].generoGate) newAcc[sport].generoGate = { enabled: true, Masculino: { enabled: true }, Femenino: { enabled: true } };
+        newAcc[sport].generoGate[g] = { enabled: val };
+        await db.collection('forza_eventos').doc(state.activeEventId).collection('rooms').doc(room.id).update({ access: newAcc });
+      }, 'sm'));
+      gWrap.appendChild(row);
+    });
+    if (atletasCache) {
+      const knownCount = atletasCache.filter(a => a.deporte === sport && a.genero).length;
+      if (knownCount === 0) {
+        const warn = el('div', 'ibar ibar-a');
+        warn.style.cssText = 'margin-top:8px;font-size:11px';
+        warn.textContent = '⚠️ No se encontró ningún atleta con género conocido para este deporte en el roster cargado. Con el filtro activado, TODOS los escaneos de este deporte quedarán pendientes de revisión manual hasta que se importe el roster de este deporte (pestaña Evento) o se abra la pestaña Escáner para cargarlo.';
+        gWrap.appendChild(warn);
+      }
+    }
+  }
+  body.appendChild(gWrap);
 
   Object.entries(sObj.states || {}).forEach(([state2, stObj]) => {
     body.appendChild(buildStateBlock(room, sport, state2, stObj));
